@@ -1,0 +1,63 @@
+---
+version: '3.8'
+services:
+  mock-avi:
+    build:
+      context: .
+      dockerfile: Dockerfile.mock-avi
+    container_name: mock-avi-controller
+    ports:
+      - "8443:8443"
+    environment:
+      - FLASK_ENV=development
+      - FLASK_DEBUG=1
+    volumes:
+      - ./mock-avi-server.py:/app/mock-avi-server.py
+    networks:
+      - avi-testing
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
+    healthcheck:
+      test: ["CMD", "curl", "-k", "-f", "https://localhost:8443/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+  telegraf:
+    container_name: avi-telegraf-testing
+    image: 'telegraf:1.29-alpine'
+    depends_on:
+      - mock-avi
+    environment:
+      # Mock AVI Controller Configuration
+      - AVI_CONTROLLER_IP=mock-avi:8443
+      - AVI_USERNAME=admin
+      - AVI_PASSWORD=admin123
+      
+      # Kentik Configuration (still need real values)
+      - KENTIK_API_ENDPOINT=${KENTIK_API_ENDPOINT:-https://grpc.api.kentik.com/kmetrics/v202207/metrics/api/v2/write?bucket=&org=&precision=ns}
+      - KENTIK_API_TOKEN=${KENTIK_API_TOKEN:-your-kentik-token-here}
+      - KENTIK_API_EMAIL=${KENTIK_API_EMAIL:-your-email@company.com}
+      
+      # Environment Tags
+      - ENVIRONMENT=testing
+      - LOCATION=mock-environment
+      
+    volumes:
+      - './telegraf.conf:/etc/telegraf/telegraf.conf:ro'
+      - './logs:/var/log/telegraf'
+    restart: unless-stopped
+    networks:
+      - avi-testing
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+networks:
+  avi-testing:
+    driver: bridge

@@ -1,0 +1,226 @@
+#!/usr/bin/env python3
+"""
+Test script for Mock AVI Controller API
+"""
+
+import requests
+import json
+import sys
+import urllib3
+from requests.auth import HTTPBasicAuth
+
+# Disable SSL warnings for testing
+urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
+
+class MockAVITester:
+    def __init__(self, base_url="https://localhost:8443", username="admin", password="admin123"):
+        self.base_url = base_url
+        self.auth = HTTPBasicAuth(username, password)
+        self.session = requests.Session()
+        self.session.verify = False  # Skip SSL verification for testing
+    
+    def test_health(self):
+        """Test health endpoint"""
+        print("🔍 Testing health endpoint...")
+        try:
+            response = self.session.get(f"{self.base_url}/health")
+            if response.status_code == 200:
+                print("✅ Health check passed")
+                return True
+            else:
+                print(f"❌ Health check failed: {response.status_code}")
+                return False
+        except Exception as e:
+            print(f"❌ Health check error: {e}")
+            return False
+    
+    def test_authentication(self):
+        """Test authentication"""
+        print("🔍 Testing authentication...")
+        try:
+            # Test with correct credentials
+            response = self.session.get(f"{self.base_url}/api/tenant", auth=self.auth)
+            if response.status_code == 200:
+                print("✅ Authentication successful")
+                return True
+            else:
+                print(f"❌ Authentication failed: {response.status_code}")
+                return False
+        except Exception as e:
+            print(f"❌ Authentication error: {e}")
+            return False
+    
+    def test_virtualservice_metrics(self):
+        """Test virtual service metrics endpoint"""
+        print("🔍 Testing Virtual Service metrics...")
+        try:
+            params = {
+                'metric_id': 'l4_server.avg_complete_conns,l7_server.avg_complete_responses',
+                'step': 300,
+                'limit': 1
+            }
+            response = self.session.get(
+                f"{self.base_url}/api/analytics/metrics/virtualservice",
+                auth=self.auth,
+                params=params
+            )
+            
+            if response.status_code == 200:
+                data = response.json()
+                series_count = len(data.get('series', []))
+                print(f"✅ Virtual Service metrics returned {series_count} series")
+                
+                # Print sample data
+                if series_count > 0:
+                    sample = data['series'][0]
+                    print(f"   📊 Sample metric: {sample.get('metric_id')}")
+                    print(f"   🏷️  Tags: {sample.get('tags', {})}")
+                    print(f"   📈 Data points: {len(sample.get('data', []))}")
+                
+                return True
+            else:
+                print(f"❌ Virtual Service metrics failed: {response.status_code}")
+                return False
+        except Exception as e:
+            print(f"❌ Virtual Service metrics error: {e}")
+            return False
+    
+    def test_pool_metrics(self):
+        """Test pool metrics endpoint"""
+        print("🔍 Testing Pool metrics...")
+        try:
+            params = {
+                'metric_id': 'l4_server.avg_complete_conns,l4_server.sum_connection_errors',
+                'step': 300,
+                'limit': 1
+            }
+            response = self.session.get(
+                f"{self.base_url}/api/analytics/metrics/pool",
+                auth=self.auth,
+                params=params
+            )
+            
+            if response.status_code == 200:
+                data = response.json()
+                series_count = len(data.get('series', []))
+                print(f"✅ Pool metrics returned {series_count} series")
+                return True
+            else:
+                print(f"❌ Pool metrics failed: {response.status_code}")
+                return False
+        except Exception as e:
+            print(f"❌ Pool metrics error: {e}")
+            return False
+    
+    def test_serviceengine_metrics(self):
+        """Test service engine metrics endpoint"""
+        print("🔍 Testing Service Engine metrics...")
+        try:
+            params = {
+                'metric_id': 'se_stats.avg_cpu_usage,se_stats.avg_mem_usage',
+                'step': 300,
+                'limit': 1
+            }
+            response = self.session.get(
+                f"{self.base_url}/api/analytics/metrics/serviceengine",
+                auth=self.auth,
+                params=params
+            )
+            
+            if response.status_code == 200:
+                data = response.json()
+                series_count = len(data.get('series', []))
+                print(f"✅ Service Engine metrics returned {series_count} series")
+                return True
+            else:
+                print(f"❌ Service Engine metrics failed: {response.status_code}")
+                return False
+        except Exception as e:
+            print(f"❌ Service Engine metrics error: {e}")
+            return False
+    
+    def test_controller_metrics(self):
+        """Test controller metrics endpoint"""
+        print("🔍 Testing Controller metrics...")
+        try:
+            params = {
+                'metric_id': 'controller_stats.avg_cpu_usage,controller_stats.avg_mem_usage',
+                'step': 300,
+                'limit': 1
+            }
+            response = self.session.get(
+                f"{self.base_url}/api/analytics/metrics/controller",
+                auth=self.auth,
+                params=params
+            )
+            
+            if response.status_code == 200:
+                data = response.json()
+                series_count = len(data.get('series', []))
+                print(f"✅ Controller metrics returned {series_count} series")
+                return True
+            else:
+                print(f"❌ Controller metrics failed: {response.status_code}")
+                return False
+        except Exception as e:
+            print(f"❌ Controller metrics error: {e}")
+            return False
+    
+    def test_all_endpoints(self):
+        """Run all tests"""
+        print("🚀 Starting Mock AVI Controller API Tests")
+        print("=" * 50)
+        
+        tests = [
+            ("Health Check", self.test_health),
+            ("Authentication", self.test_authentication),
+            ("Virtual Service Metrics", self.test_virtualservice_metrics),
+            ("Pool Metrics", self.test_pool_metrics),
+            ("Service Engine Metrics", self.test_serviceengine_metrics),
+            ("Controller Metrics", self.test_controller_metrics)
+        ]
+        
+        passed = 0
+        total = len(tests)
+        
+        for test_name, test_func in tests:
+            print(f"\n📋 Running: {test_name}")
+            if test_func():
+                passed += 1
+            else:
+                print(f"   ⚠️  {test_name} failed")
+        
+        print("\n" + "=" * 50)
+        print(f"📊 Test Results: {passed}/{total} tests passed")
+        
+        if passed == total:
+            print("🎉 All tests passed! Mock AVI server is working correctly.")
+            return True
+        else:
+            print("❌ Some tests failed. Check the server logs for details.")
+            return False
+
+def main():
+    """Main function"""
+    if len(sys.argv) > 1:
+        base_url = sys.argv[1]
+    else:
+        base_url = "https://localhost:8443"
+    
+    if len(sys.argv) > 3:
+        username = sys.argv[2]
+        password = sys.argv[3]
+    else:
+        username = "admin"
+        password = "admin123"
+    
+    print(f"🔗 Testing Mock AVI API at: {base_url}")
+    print(f"👤 Using credentials: {username}:{'*' * len(password)}")
+    
+    tester = MockAVITester(base_url, username, password)
+    success = tester.test_all_endpoints()
+    
+    sys.exit(0 if success else 1)
+
+if __name__ == "__main__":
+    main()

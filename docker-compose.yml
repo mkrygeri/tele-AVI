@@ -1,0 +1,36 @@
+---
+version: '3.8'
+services:
+  telegraf:
+    container_name: avi-telegraf
+    image: 'telegraf:1.29-alpine'
+    environment:
+      # AVI Controller Configuration
+      - AVI_CONTROLLER_IP=your-avi-controller-ip
+      - AVI_USERNAME=your-avi-username  
+      - AVI_PASSWORD=your-avi-password
+      
+      # Kentik Configuration
+      - KENTIK_API_ENDPOINT=https://grpc.api.kentik.com/kmetrics/v202207/metrics/api/v2/write?bucket=&org=&precision=ns
+      - KENTIK_API_TOKEN=your-kentik-api-token
+      - KENTIK_API_EMAIL=your-kentik-email
+      
+      # Environment Tags
+      - ENVIRONMENT=production
+      - LOCATION=your-datacenter-location
+      
+    volumes:
+      - './telegraf.conf:/etc/telegraf/telegraf.conf:ro'
+      - './logs:/var/log/telegraf'
+    restart: unless-stopped
+    networks:
+      - avi-monitoring
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+networks:
+  avi-monitoring:
+    driver: bridge
