@@ -1,6 +1,10 @@
-# AVI Load Balancer to Kentik Integration using Telegraf
+# AVI Load Balancer to Kentik NMS Integration
 
-This repository contains a Telegraf configuration to collect metrics from VMware AVI Load Balancer (NSX Advanced Load Balancer) and send them to Kentik NMS for monitoring and analysis.
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
+[![Docker](https://img.shields.io/badge/docker-%230db7ed.svg?style=flat&logo=docker&logoColor=white)](https://www.docker.com/)
+[![Telegraf](https://img.shields.io/badge/telegraf-1.29+-blue.svg)](https://www.influxdata.com/time-series-platform/telegraf/)
+
+A comprehensive Telegraf configuration for collecting metrics from VMware AVI Load Balancer (NSX Advanced Load Balancer) and sending them to Kentik NMS for network observability and analytics.
 
 ## Overview
 
