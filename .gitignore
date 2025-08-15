@@ -1,6 +1,12 @@
 # Logs
 logs/
 *.log
+*.out
+
+# Telegraf output files
+test-metrics.out
+avi-metrics.out
+avi-debug.out
 
 # Environment variables
 .env
