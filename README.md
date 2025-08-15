@@ -6,9 +6,305 @@
 
 A comprehensive Telegraf configuration for collecting metrics from VMware AVI Load Balancer (NSX Advanced Load Balancer) and sending them to Kentik NMS for network observability and analytics.
 
-## Overview
+## 🚀 Features
 
-The configuration collects the following metrics from AVI:
+- **Complete AVI Metrics Collection**: Virtual Services, Pools, Service Engines, and Controller metrics
+- **Kentik NMS Integration**: Direct data pipeline to Kentik for network observability  
+- **Production Ready**: Comprehensive configuration with proper tagging and error handling
+- **Mock Testing Environment**: Full testing infrastructure for development and validation
+- **Docker Support**: Containerized deployment with Docker Compose
+- **Security**: TLS support and authentication handling
+
+## 📊 Metrics Collected
+
+### Virtual Services
+- L4/L7 connection statistics
+- Request/response metrics  
+- Pool connection statistics
+
+### Pools
+- Connection statistics (complete, new, open)
+- Connection error counts
+- Pool health metrics
+
+### Service Engines
+- CPU, Memory, Disk utilization
+- Network bandwidth metrics
+- Performance statistics
+
+### Controller
+- Cluster health metrics
+- Resource utilization  
+- System statistics
+
+## 🏗️ Architecture
+
+```
+AVI Load Balancer → Telegraf → Kentik NMS
+     ↑                ↑           ↑
+   REST API      JSON Parser  HTTP Output
+```
+
+## 🚀 Quick Start
+
+### Prerequisites
+
+- Docker and Docker Compose (or [OrbStack](https://orbstack.dev/) as alternative)
+- AVI Load Balancer with API access
+- Kentik NMS account and API credentials
+
+### 1. Clone Repository
+
+```bash
+git clone https://github.com/mkrygeri/tele-AVI.git
+cd tele-AVI
+```
+
+### 2. Configure Environment
+
+Copy the example environment file and configure your settings:
+
+```bash
+cp .env.example .env
+```
+
+Edit `.env` with your AVI and Kentik credentials:
+
+```bash
+# AVI Load Balancer Configuration
+AVI_CONTROLLER_IP=your-avi-controller.example.com
+AVI_USERNAME=your-avi-username  
+AVI_PASSWORD=your-avi-password
+
+# Kentik NMS Configuration
+KENTIK_API_ENDPOINT=https://api.kentik.com/api/v5/write/influx
+KENTIK_API_EMAIL=your-email@example.com
+KENTIK_API_TOKEN=your-kentik-api-token
+
+# Environment Configuration
+ENVIRONMENT=production
+LOCATION=datacenter-1
+```
+
+### 3. Deploy
+
+For production deployment:
+
+```bash
+make deploy
+```
+
+For testing with mock AVI server:
+
+```bash
+make dev-start
+```
+
+### 4. Validate
+
+```bash
+make validate
+make status
+make logs
+```
+
+## 🧪 Testing
+
+This repository includes a complete mock testing environment:
+
+### Quick Test
+
+```bash
+# Start mock environment and run tests
+make test-all
+
+# Or step by step
+make mock-start  # Start mock AVI server
+make mock-test   # Test API endpoints  
+make logs-test   # View metrics collection
+make mock-stop   # Clean up
+```
+
+### Mock Server Features
+
+- **Realistic Data**: Time-series metrics with variance
+- **Authentication**: HTTP Basic Auth simulation
+- **HTTPS Support**: Self-signed certificates for testing
+- **Full API Coverage**: All 4 AVI metric endpoints
+
+## 📁 Repository Structure
+
+```
+tele-AVI/
+├── README.md              # This file
+├── telegraf.conf          # Main Telegraf configuration  
+├── docker-compose.yml     # Production Docker setup
+├── mock-avi-server.py     # Mock AVI Load Balancer API
+├── Makefile              # Development commands
+├── docs/                 # Detailed documentation
+│   ├── CONFIGURATION.md  # Configuration guide
+│   ├── DEPLOYMENT.md     # Production deployment  
+│   └── TROUBLESHOOTING.md # Common issues
+└── examples/             # Example configurations
+```
+
+## ⚙️ Configuration
+
+### Environment Variables
+
+| Variable | Description | Example |
+|----------|-------------|---------|
+| `AVI_CONTROLLER_IP` | AVI Controller IP/FQDN | `192.168.1.100` |
+| `AVI_USERNAME` | AVI API Username | `admin` |
+| `AVI_PASSWORD` | AVI API Password | `SecurePass123!` |
+| `KENTIK_API_ENDPOINT` | Kentik API Endpoint | `https://api.kentik.com/api/v5/write/influx` |
+| `KENTIK_API_EMAIL` | Kentik Account Email | `user@company.com` |
+| `KENTIK_API_TOKEN` | Kentik API Token | `your-api-token` |
+| `ENVIRONMENT` | Deployment Environment | `production` |
+| `LOCATION` | Physical Location | `us-west-1` |
+
+### TLS Configuration
+
+For production deployments with proper TLS certificates:
+
+```toml
+# Uncomment and configure in telegraf.conf
+tls_ca = "/path/to/ca.pem"
+tls_cert = "/path/to/cert.pem"
+tls_key = "/path/to/key.pem"
+insecure_skip_verify = false
+```
+
+## 🔍 Monitoring
+
+### Metrics Output Format
+
+All metrics are output in InfluxDB Line Protocol format with consistent tagging:
+
+```
+avi_pool,environment=production,pool_name=web-app-pool,product=AVI_Load_Balancer,vendor=VMware pool_connections_avg_complete=150.5,pool_connections_avg_new_established=25.2 1693756800000000000
+```
+
+### Global Tags
+
+- `vendor`: VMware
+- `product`: AVI_Load_Balancer
+- `environment`: Configurable (dev/staging/prod)
+- `location`: Configurable datacenter/region
+
+## 📈 Production Deployment
+
+### System Requirements
+
+- **CPU**: 2+ cores
+- **Memory**: 4GB+ RAM
+- **Disk**: 10GB+ available space
+- **Network**: Access to AVI Controller and Kentik APIs
+
+### High Availability
+
+For production HA deployments:
+
+1. Deploy multiple Telegraf instances
+2. Use external load balancer
+3. Configure shared storage for logs
+4. Set up monitoring alerts
+
+### Performance Tuning
+
+Key configuration parameters:
+
+```toml
+[agent]
+  interval = "60s"           # Collection interval
+  metric_batch_size = 1000   # Batch size for outputs
+  metric_buffer_limit = 10000 # Buffer size
+  flush_interval = "10s"     # Output flush interval
+```
+
+## 🛠️ Development
+
+### Prerequisites
+
+- Python 3.8+
+- Docker/OrbStack  
+- AVI Load Balancer (or use mock server)
+
+### Setup Development Environment  
+
+```bash
+# Clone repository
+git clone https://github.com/mkrygeri/tele-AVI.git
+cd tele-AVI
+
+# Setup environment
+make setup
+
+# Start development environment
+make dev-start
+
+# Run tests
+make test-all
+```
+
+### Available Commands
+
+```bash
+make help          # Show all available commands
+make setup         # Initial setup
+make validate      # Validate configuration
+make dev-start     # Start development environment  
+make test-all      # Run comprehensive tests
+make deploy        # Production deployment
+make clean         # Clean up resources
+```
+
+## 🐛 Troubleshooting
+
+### Common Issues
+
+#### Telegraf Not Collecting Metrics
+- Check AVI Controller connectivity
+- Verify credentials in `.env`
+- Review Telegraf logs: `make logs`
+
+#### TLS Certificate Errors
+- For testing: Use `insecure_skip_verify = true`
+- For production: Configure proper certificate paths
+
+#### Kentik Integration Issues
+- Verify API endpoint and credentials
+- Check network connectivity to Kentik
+- Review HTTP output plugin configuration
+
+See [TROUBLESHOOTING.md](docs/TROUBLESHOOTING.md) for detailed solutions.
+
+## 📄 Documentation
+
+- **[Configuration Guide](docs/CONFIGURATION.md)**: Detailed configuration reference
+- **[Deployment Guide](docs/DEPLOYMENT.md)**: Production deployment instructions
+- **[Troubleshooting](docs/TROUBLESHOOTING.md)**: Common issues and solutions
+- **[Project Overview](PROJECT_OVERVIEW.md)**: Complete project documentation
+
+## 🤝 Contributing
+
+Contributions are welcome! Please read our [Contributing Guide](CONTRIBUTING.md) for details on our development process and how to submit pull requests.
+
+## 🔒 Security
+
+Please see our [Security Policy](SECURITY.md) for reporting vulnerabilities and security best practices.
+
+## 📄 License
+
+This project is licensed under the MIT License - see the [LICENSE](LICENSE) file for details.
+
+## 🏷️ Tags
+
+`telegraf` `avi-load-balancer` `kentik` `nms` `monitoring` `observability` `vmware` `nsx` `docker` `influxdb`
+
+---
+
+**Built with ❤️ for network observability and monitoring**
 
 ### Virtual Service Metrics
 - Average complete connections
