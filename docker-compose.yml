@@ -4,21 +4,10 @@ services:
   telegraf:
     container_name: avi-telegraf
     image: 'telegraf:1.29-alpine'
-    environment:
-      # AVI Controller Configuration
-      - AVI_CONTROLLER_IP=your-avi-controller-ip
-      - AVI_USERNAME=your-avi-username  
-      - AVI_PASSWORD=your-avi-password
-      
-      # Kentik Configuration
-      - KENTIK_API_ENDPOINT=https://grpc.api.kentik.com/kmetrics/v202207/metrics/api/v2/write?bucket=&org=&precision=ns
-      - KENTIK_API_TOKEN=your-kentik-api-token
-      - KENTIK_API_EMAIL=your-kentik-email
-      
-      # Environment Tags
-      - ENVIRONMENT=production
-      - LOCATION=your-datacenter-location
-      
+    # Real configuration is read from .env (AVI_*, KENTIK_*, ENVIRONMENT, LOCATION).
+    env_file:
+      - .env
+
     volumes:
       - './telegraf.conf:/etc/telegraf/telegraf.conf:ro'
       - './logs:/var/log/telegraf'

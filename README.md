@@ -75,9 +75,10 @@ Edit `.env` with your AVI and Kentik credentials:
 AVI_CONTROLLER_IP=your-avi-controller.example.com
 AVI_USERNAME=your-avi-username  
 AVI_PASSWORD=your-avi-password
+AVI_DEVICE_NAME=avi-controller-01
 
 # Kentik NMS Configuration
-KENTIK_API_ENDPOINT=https://api.kentik.com/api/v5/write/influx
+KENTIK_API_ENDPOINT="https://grpc.api.kentik.com/kmetrics/v202207/metrics/api/v2/write?bucket=&org=&precision=ns"
 KENTIK_API_EMAIL=your-email@example.com
 KENTIK_API_TOKEN=your-kentik-api-token
 
@@ -128,7 +129,7 @@ make mock-stop   # Clean up
 ### Mock Server Features
 
 - **Realistic Data**: Time-series metrics with variance
-- **Authentication**: HTTP Basic Auth simulation
+- **Authentication**: AVI session login (`POST /login` → cookie); HTTP Basic Auth accepted as a fallback
 - **HTTPS Support**: Self-signed certificates for testing
 - **Full API Coverage**: All 4 AVI metric endpoints
 
@@ -157,7 +158,8 @@ tele-AVI/
 | `AVI_CONTROLLER_IP` | AVI Controller IP/FQDN | `192.168.1.100` |
 | `AVI_USERNAME` | AVI API Username | `admin` |
 | `AVI_PASSWORD` | AVI API Password | `SecurePass123!` |
-| `KENTIK_API_ENDPOINT` | Kentik API Endpoint | `https://api.kentik.com/api/v5/write/influx` |
+| `AVI_DEVICE_NAME` | Device name tag sent to Kentik | `avi-controller-01` |
+| `KENTIK_API_ENDPOINT` | Kentik API Endpoint | `https://grpc.api.kentik.com/kmetrics/v202207/metrics/api/v2/write?bucket=&org=&precision=ns` |
 | `KENTIK_API_EMAIL` | Kentik Account Email | `user@company.com` |
 | `KENTIK_API_TOKEN` | Kentik API Token | `your-api-token` |
 | `ENVIRONMENT` | Deployment Environment | `production` |
@@ -179,10 +181,13 @@ insecure_skip_verify = false
 
 ### Metrics Output Format
 
-All metrics are output in InfluxDB Line Protocol format with consistent tagging:
+Metrics are sent in InfluxDB Line Protocol. The pipeline produces a **wide-format**
+record per entity: each metric name becomes its own field, all merged into one
+record. Measurements use OpenConfig-style paths (`/devices/avi/<entity>`), and
+field keys are dot-free (`.` → `_`):
 
 ```
-avi_pool,environment=production,pool_name=web-app-pool,product=AVI_Load_Balancer,vendor=VMware pool_connections_avg_complete=150.5,pool_connections_avg_new_established=25.2 1693756800000000000
+/devices/avi/pool,device_name=avi-controller-01,entity_uuid=pool-web-app-uuid-1234,environment=production,ip_address=198.47.119.104,location=datacenter-1,product=AVI_Load_Balancer,vendor=VMware l4_server_avg_complete_conns=150.5,l4_server_avg_new_established_conns=25.2,l4_server_avg_pool_open_conns=63.1,l4_server_sum_connection_errors=0.4 1693756800000000000
 ```
 
 ### Global Tags
@@ -191,6 +196,8 @@ avi_pool,environment=production,pool_name=web-app-pool,product=AVI_Load_Balancer
 - `product`: AVI_Load_Balancer
 - `environment`: Configurable (dev/staging/prod)
 - `location`: Configurable datacenter/region
+- `device_name`: AVI device name (`${AVI_DEVICE_NAME}`)
+- `ip_address`: AVI controller IP (`${AVI_CONTROLLER_IP}`)
 
 ## 📈 Production Deployment
 
@@ -365,10 +372,12 @@ This project is licensed under the MIT License - see the [LICENSE](LICENSE) file
    AVI_CONTROLLER_IP=your-avi-controller-ip
    AVI_USERNAME=your-avi-username
    AVI_PASSWORD=your-avi-password
+   AVI_DEVICE_NAME=avi-controller-01
    
    # Kentik Configuration
    KENTIK_API_TOKEN=your-kentik-api-token
    KENTIK_API_EMAIL=your-kentik-email@company.com
+   KENTIK_API_ENDPOINT="https://grpc.api.kentik.com/kmetrics/v202207/metrics/api/v2/write?bucket=&org=&precision=ns"
    
    # Environment Tags
    ENVIRONMENT=production
@@ -433,7 +442,7 @@ The mock AVI server provides:
 - **Realistic API responses** mimicking AVI Controller API
 - **Multiple virtual services, pools, and service engines**
 - **Time-series data** with realistic variance
-- **HTTP Basic Authentication** (admin:admin123)
+- **Session login authentication** via `POST /login` (admin:admin123); HTTP Basic Auth accepted as a fallback
 - **HTTPS endpoint** on port 8443
 
 ## Configuration Details
@@ -449,7 +458,12 @@ The configuration queries the following AVI Controller API endpoints:
 
 ### Authentication
 
-Authentication to AVI Controller uses HTTP Basic Auth with the configured username and password. For production deployments, consider:
+Authentication to the AVI Controller uses **session login**: Telegraf's HTTP input
+performs a `POST /login` with a JSON body (`{"username": ..., "password": ...}`) and
+`Content-Type: application/json`, then reuses the returned session cookie for all
+analytics API calls. The cookie is renewed automatically (`cookie_auth_renewal`). The
+AVI API does **not** accept HTTP Basic Auth for analytics by default. For production
+deployments, consider:
 
 - Using certificate-based authentication
 - Storing credentials in a secure secrets management system
@@ -498,7 +512,7 @@ For testing and development purposes, this project includes a mock AVI Controlle
 #### Features
 - **Complete API Simulation**: Mimics all AVI Controller metrics endpoints
 - **Realistic Data**: Generates time-series metrics with realistic variance
-- **Authentication**: HTTP Basic Auth (admin:admin123)
+- **Authentication**: Session login via `POST /login` (admin:admin123); HTTP Basic Auth accepted as a fallback
 - **HTTPS Support**: Self-signed certificates for testing
 - **Docker Support**: Containerized for easy deployment
 
@@ -534,10 +548,10 @@ python3 test-mock-avi.py
 
 #### Mock Data Generated
 The mock server generates realistic metrics for:
-- 3 Virtual Services (web-app-vs, api-vs, mobile-vs)
-- 3 Pools (web-app-pool, api-pool, database-pool)  
-- 3 Service Engines (Avi-se-1, Avi-se-2, Avi-se-3)
-- 3 Controllers (avi-controller-1, avi-controller-2, avi-controller-3)
+- 5 Virtual Services (web-app, api, mobile, auth, checkout)
+- 5 Pools (web-app, api, mobile, auth, database)  
+- 3 Service Engines (se-1, se-2, se-3)
+- 1 Controller (single controller entity, 30 `controller_stats.*` metrics)
 
 All metrics include time-series data with realistic variance and proper tagging.
 
@@ -636,9 +650,9 @@ After data starts flowing to Kentik:
    - Set up alerting for critical thresholds
 
 2. **Example Queries**
-   - Virtual Service Connection Rate: `avg(connections_avg_new_established) by vs_name`
-   - Service Engine CPU Utilization: `avg(cpu_usage_avg_percent) by se_name`
-   - Pool Health: `sum(pool_connection_errors_sum) by pool_name`
+   - Virtual Service Connection Rate: `avg(l4_server_avg_new_established_conns) by entity_uuid`
+   - Service Engine CPU Utilization: `avg(se_stats_avg_cpu_usage) by entity_uuid`
+   - Pool Connection Errors: `sum(l4_server_sum_connection_errors) by entity_uuid`
 
 ## Support and Maintenance
 

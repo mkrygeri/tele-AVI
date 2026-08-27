@@ -111,9 +111,10 @@ Create `/etc/telegraf/.env`:
 AVI_CONTROLLER_IP=avi-controller.example.com
 AVI_USERNAME=telegraf-service
 AVI_PASSWORD=secure-password-here
+AVI_DEVICE_NAME=avi-controller-01
 
 # Kentik Configuration
-KENTIK_API_ENDPOINT=https://api.kentik.com/api/v5/write/influx
+KENTIK_API_ENDPOINT="https://grpc.api.kentik.com/kmetrics/v202207/metrics/api/v2/write?bucket=&org=&precision=ns"
 KENTIK_API_EMAIL=monitoring@example.com
 KENTIK_API_TOKEN=your-secure-api-token
 

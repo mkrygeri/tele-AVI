@@ -36,6 +36,7 @@ services:
       - AVI_CONTROLLER_IP=mock-avi:8443
       - AVI_USERNAME=admin
       - AVI_PASSWORD=admin123
+      - AVI_DEVICE_NAME=mock-avi
       
       # Kentik Configuration (still need real values)
       - KENTIK_API_ENDPOINT=${KENTIK_API_ENDPOINT:-https://grpc.api.kentik.com/kmetrics/v202207/metrics/api/v2/write?bucket=&org=&precision=ns}

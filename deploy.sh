@@ -75,6 +75,11 @@ validate_config() {
         return 1
     fi
     
+    if [ -z "$AVI_DEVICE_NAME" ] || [ "$AVI_DEVICE_NAME" = "your-avi-device-name" ]; then
+        print_error "AVI_DEVICE_NAME not configured in .env file"
+        return 1
+    fi
+    
     # Check Kentik configuration
     if [ -z "$KENTIK_API_TOKEN" ] || [ "$KENTIK_API_TOKEN" = "your-kentik-api-token-here" ]; then
         print_error "KENTIK_API_TOKEN not configured in .env file"
@@ -114,17 +119,20 @@ test_avi_connectivity() {
     
     # Test API endpoint (optional, requires curl)
     if command -v curl &> /dev/null; then
-        print_status "Testing AVI API endpoint..."
+        print_status "Testing AVI API session login..."
         
+        # AVI uses session login (POST /login), not HTTP Basic Auth
         response=$(curl -k -s -w "%{http_code}" -o /dev/null \
             --max-time 10 \
-            -u "$AVI_USERNAME:$AVI_PASSWORD" \
-            "https://$AVI_CONTROLLER_IP/api/tenant" 2>/dev/null || echo "000")
+            -X POST \
+            -H "Content-Type: application/json" \
+            -d "{\"username\":\"$AVI_USERNAME\",\"password\":\"$AVI_PASSWORD\"}" \
+            "https://$AVI_CONTROLLER_IP/login" 2>/dev/null || echo "000")
         
         if [ "$response" = "200" ]; then
-            print_status "AVI API authentication successful"
+            print_status "AVI API session login successful"
         elif [ "$response" = "401" ]; then
-            print_error "AVI API authentication failed - check username/password"
+            print_error "AVI API login failed - check username/password"
         elif [ "$response" = "000" ]; then
             print_warning "Could not reach AVI API endpoint"
         else

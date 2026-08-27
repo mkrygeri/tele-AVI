@@ -7,7 +7,6 @@ import requests
 import json
 import sys
 import urllib3
-from requests.auth import HTTPBasicAuth
 
 # Disable SSL warnings for testing
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
@@ -15,10 +14,20 @@ urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 class MockAVITester:
     def __init__(self, base_url="https://localhost:8443", username="admin", password="admin123"):
         self.base_url = base_url
-        self.auth = HTTPBasicAuth(username, password)
+        self.username = username
+        self.password = password
         self.session = requests.Session()
         self.session.verify = False  # Skip SSL verification for testing
-    
+
+    def login(self):
+        """Authenticate via AVI session login (POST /login) and store the cookie."""
+        response = self.session.post(
+            f"{self.base_url}/login",
+            json={"username": self.username, "password": self.password},
+            headers={"Content-Type": "application/json"},
+        )
+        return response.status_code == 200
+
     def test_health(self):
         """Test health endpoint"""
         print("🔍 Testing health endpoint...")
@@ -35,13 +44,17 @@ class MockAVITester:
             return False
     
     def test_authentication(self):
-        """Test authentication"""
+        """Test session login authentication"""
         print("🔍 Testing authentication...")
         try:
-            # Test with correct credentials
-            response = self.session.get(f"{self.base_url}/api/tenant", auth=self.auth)
+            # Log in via POST /login to obtain a session cookie
+            if not self.login():
+                print("❌ Session login failed")
+                return False
+            # Confirm the cookie is accepted on an authenticated endpoint
+            response = self.session.get(f"{self.base_url}/api/tenant")
             if response.status_code == 200:
-                print("✅ Authentication successful")
+                print("✅ Authentication successful (session cookie)")
                 return True
             else:
                 print(f"❌ Authentication failed: {response.status_code}")
@@ -61,20 +74,21 @@ class MockAVITester:
             }
             response = self.session.get(
                 f"{self.base_url}/api/analytics/metrics/virtualservice",
-                auth=self.auth,
                 params=params
             )
             
             if response.status_code == 200:
                 data = response.json()
-                series_count = len(data.get('series', []))
+                results = data.get('results', [])
+                series_count = sum(len(r.get('series', [])) for r in results)
                 print(f"✅ Virtual Service metrics returned {series_count} series")
                 
                 # Print sample data
-                if series_count > 0:
-                    sample = data['series'][0]
-                    print(f"   📊 Sample metric: {sample.get('metric_id')}")
-                    print(f"   🏷️  Tags: {sample.get('tags', {})}")
+                if results and results[0].get('series'):
+                    sample = results[0]['series'][0]
+                    header = sample.get('header', {})
+                    print(f"   📊 Sample metric: {header.get('name')}")
+                    print(f"   🏷️  Entity UUID: {header.get('entity_uuid')}")
                     print(f"   📈 Data points: {len(sample.get('data', []))}")
                 
                 return True
@@ -96,13 +110,12 @@ class MockAVITester:
             }
             response = self.session.get(
                 f"{self.base_url}/api/analytics/metrics/pool",
-                auth=self.auth,
                 params=params
             )
             
             if response.status_code == 200:
                 data = response.json()
-                series_count = len(data.get('series', []))
+                series_count = sum(len(r.get('series', [])) for r in data.get('results', []))
                 print(f"✅ Pool metrics returned {series_count} series")
                 return True
             else:
@@ -123,13 +136,12 @@ class MockAVITester:
             }
             response = self.session.get(
                 f"{self.base_url}/api/analytics/metrics/serviceengine",
-                auth=self.auth,
                 params=params
             )
             
             if response.status_code == 200:
                 data = response.json()
-                series_count = len(data.get('series', []))
+                series_count = sum(len(r.get('series', [])) for r in data.get('results', []))
                 print(f"✅ Service Engine metrics returned {series_count} series")
                 return True
             else:
@@ -150,13 +162,12 @@ class MockAVITester:
             }
             response = self.session.get(
                 f"{self.base_url}/api/analytics/metrics/controller",
-                auth=self.auth,
                 params=params
             )
             
             if response.status_code == 200:
                 data = response.json()
-                series_count = len(data.get('series', []))
+                series_count = sum(len(r.get('series', [])) for r in data.get('results', []))
                 print(f"✅ Controller metrics returned {series_count} series")
                 return True
             else:

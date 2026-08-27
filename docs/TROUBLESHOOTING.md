@@ -23,8 +23,13 @@ docker stats
 ### Connectivity Tests
 
 ```bash
-# Test AVI Controller API
-curl -k -u "${AVI_USERNAME}:${AVI_PASSWORD}" \
+# Log in to the AVI Controller and save the session cookie
+curl -k -c cookies.txt -X POST "https://${AVI_CONTROLLER_IP}/login" \
+  -H "Content-Type: application/json" \
+  -d "{\"username\":\"${AVI_USERNAME}\",\"password\":\"${AVI_PASSWORD}\"}"
+
+# Use the session cookie to query the analytics API
+curl -k -b cookies.txt \
   "https://${AVI_CONTROLLER_IP}/api/analytics/metrics/virtualservice"
 
 # Test Kentik API
@@ -54,10 +59,15 @@ ERROR: Authentication failed for AVI Controller
 
 1. **Verify Credentials**
    ```bash
-   # Test with curl
-   curl -k -u "${AVI_USERNAME}:${AVI_PASSWORD}" \
-     "https://${AVI_CONTROLLER_IP}/api/initial-data"
+   # Log in and confirm a session cookie is issued (HTTP 200)
+   curl -k -i -X POST "https://${AVI_CONTROLLER_IP}/login" \
+     -H "Content-Type: application/json" \
+     -d "{\"username\":\"${AVI_USERNAME}\",\"password\":\"${AVI_PASSWORD}\"}"
    ```
+
+   > The AVI analytics API does **not** accept HTTP Basic Auth by default. Telegraf
+   > authenticates with `cookie_auth_*` (POST `/login` → session cookie). A 401 on
+   > analytics calls usually means the login step failed or the cookie expired.
 
 2. **Check User Permissions**
    - User must have "Read" access to Analytics
@@ -172,16 +182,19 @@ ERROR: invalid JSON response
 
 1. **Debug JSON Response**
    ```bash
-   # Get raw API response
-   curl -k -u "${AVI_USERNAME}:${AVI_PASSWORD}" \
+   # Get raw API response (log in first, then reuse the cookie)
+   curl -k -c cookies.txt -X POST "https://${AVI_CONTROLLER_IP}/login" \
+     -H "Content-Type: application/json" \
+     -d "{\"username\":\"${AVI_USERNAME}\",\"password\":\"${AVI_PASSWORD}\"}"
+   curl -k -b cookies.txt \
      "https://${AVI_CONTROLLER_IP}/api/analytics/metrics/virtualservice?metric_id=l4_server.avg_complete_conns&step=300&limit=1" | jq '.'
    ```
 
 2. **Validate JSON Paths**
    ```bash
-   # Test JSON path with jq
-   curl -k -u admin:password123 https://localhost:8443/api/analytics/metrics/virtualservice | \
-   jq '.series[0].tags.virtualservice_name'
+   # The response nests metrics under results[].series[].header/data
+   curl -k -b cookies.txt "https://localhost:8443/api/analytics/metrics/virtualservice" | \
+   jq '.results[0].series[0].header.name'
    ```
 
 3. **Update Configuration**
@@ -273,11 +286,14 @@ Container keeps restarting
 
 2. **Verify API Responses**
    ```bash
-   # Test each endpoint manually
+   # Log in once, then test each endpoint (count entities returned)
+   curl -k -c cookies.txt -X POST "https://${AVI_CONTROLLER_IP}/login" \
+     -H "Content-Type: application/json" \
+     -d "{\"username\":\"${AVI_USERNAME}\",\"password\":\"${AVI_PASSWORD}\"}"
    for endpoint in virtualservice pool serviceengine controller; do
      echo "Testing $endpoint..."
-     curl -k -u "${AVI_USERNAME}:${AVI_PASSWORD}" \
-       "https://${AVI_CONTROLLER_IP}/api/analytics/metrics/$endpoint" | jq '.series | length'
+     curl -k -b cookies.txt \
+       "https://${AVI_CONTROLLER_IP}/api/analytics/metrics/$endpoint" | jq '[.results[].series[]] | length'
    done
    ```
 
@@ -374,8 +390,11 @@ docker-compose -f docker-compose.testing.yml up -d
 # Test mock endpoints
 python test-mock-avi.py
 
-# Compare with real AVI responses
-curl -k -u admin:admin123 https://localhost:8443/api/analytics/metrics/virtualservice | jq '.'
+# Compare with real AVI responses (log in first, then reuse the cookie)
+curl -k -c cookies.txt -X POST https://localhost:8443/login \
+  -H "Content-Type: application/json" \
+  -d '{"username":"admin","password":"admin123"}'
+curl -k -b cookies.txt https://localhost:8443/api/analytics/metrics/virtualservice | jq '.'
 ```
 
 ### Mock vs Real API Differences
@@ -384,11 +403,17 @@ If working in mock environment but failing with real AVI:
 
 1. **Compare Response Formats**
    ```bash
-   # Mock response
-   curl -k -u admin:admin123 https://localhost:8443/api/analytics/metrics/virtualservice > mock_response.json
+   # Mock response (log in, then reuse the cookie)
+   curl -k -c mock_cookies.txt -X POST https://localhost:8443/login \
+     -H "Content-Type: application/json" \
+     -d '{"username":"admin","password":"admin123"}'
+   curl -k -b mock_cookies.txt https://localhost:8443/api/analytics/metrics/virtualservice > mock_response.json
    
-   # Real AVI response  
-   curl -k -u "${AVI_USERNAME}:${AVI_PASSWORD}" \
+   # Real AVI response
+   curl -k -c cookies.txt -X POST "https://${AVI_CONTROLLER_IP}/login" \
+     -H "Content-Type: application/json" \
+     -d "{\"username\":\"${AVI_USERNAME}\",\"password\":\"${AVI_PASSWORD}\"}"
+   curl -k -b cookies.txt \
      "https://${AVI_CONTROLLER_IP}/api/analytics/metrics/virtualservice" > real_response.json
    
    # Compare

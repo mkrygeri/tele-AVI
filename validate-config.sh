@@ -82,6 +82,7 @@ main() {
         validate_env_var "AVI_CONTROLLER_IP" "$AVI_CONTROLLER_IP" "your-avi-controller-ip" || ((errors++))
         validate_env_var "AVI_USERNAME" "$AVI_USERNAME" "your-avi-username" || ((errors++))
         validate_env_var "AVI_PASSWORD" "$AVI_PASSWORD" "your-avi-password" || ((errors++))
+        validate_env_var "AVI_DEVICE_NAME" "$AVI_DEVICE_NAME" "your-avi-device-name" || ((errors++))
         validate_env_var "KENTIK_API_TOKEN" "$KENTIK_API_TOKEN" "your-kentik-api-token-here" || ((errors++))
         validate_env_var "KENTIK_API_EMAIL" "$KENTIK_API_EMAIL" "your-kentik-email@company.com" || ((errors++))
         
