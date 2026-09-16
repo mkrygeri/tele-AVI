@@ -16,6 +16,9 @@ docker-compose logs --tail=50 telegraf
 # Test configuration
 docker-compose exec telegraf telegraf --config /etc/telegraf/telegraf.conf --test
 
+# Run collector directly (best for tenant/debug checks)
+docker-compose exec telegraf python3 /etc/telegraf/avi-tenant-metrics.py
+
 # Check resource usage
 docker stats
 ```
@@ -27,6 +30,9 @@ docker stats
 curl -k -c cookies.txt -X POST "https://${AVI_CONTROLLER_IP}/login" \
   -H "Content-Type: application/json" \
   -d "{\"username\":\"${AVI_USERNAME}\",\"password\":\"${AVI_PASSWORD}\"}"
+
+# Use the session cookie to query tenant discovery
+curl -k -b cookies.txt "https://${AVI_CONTROLLER_IP}/api/tenant" | jq '.count'
 
 # Use the session cookie to query the analytics API
 curl -k -b cookies.txt \
@@ -190,7 +196,7 @@ ERROR: invalid JSON response
      "https://${AVI_CONTROLLER_IP}/api/analytics/metrics/virtualservice?metric_id=l4_server.avg_complete_conns&step=300&limit=1" | jq '.'
    ```
 
-2. **Validate JSON Paths**
+2. **Validate Response Shape**
    ```bash
    # The response nests metrics under results[].series[].header/data
    curl -k -b cookies.txt "https://localhost:8443/api/analytics/metrics/virtualservice" | \
@@ -198,9 +204,9 @@ ERROR: invalid JSON response
    ```
 
 3. **Update Configuration**
-   - Verify `json_v2` path expressions
+   - Verify `AVI_TENANT_SCOPE_MODE` matches your AVI controller behavior
    - Check for changes in AVI API response format
-   - Test with minimal configuration
+   - Run `python3 /etc/telegraf/avi-tenant-metrics.py` inside the Telegraf container
 
 ### 5. Kentik Output Failures
 
@@ -286,14 +292,17 @@ Container keeps restarting
 
 2. **Verify API Responses**
    ```bash
-   # Log in once, then test each endpoint (count entities returned)
+   # Log in once, discover tenant UUIDs, then test each endpoint per tenant
    curl -k -c cookies.txt -X POST "https://${AVI_CONTROLLER_IP}/login" \
      -H "Content-Type: application/json" \
      -d "{\"username\":\"${AVI_USERNAME}\",\"password\":\"${AVI_PASSWORD}\"}"
-   for endpoint in virtualservice pool serviceengine controller; do
-     echo "Testing $endpoint..."
-     curl -k -b cookies.txt \
-       "https://${AVI_CONTROLLER_IP}/api/analytics/metrics/$endpoint" | jq '[.results[].series[]] | length'
+   for tenant in $(curl -k -b cookies.txt "https://${AVI_CONTROLLER_IP}/api/tenant" | jq -r '.results[].uuid'); do
+     for endpoint in virtualservice pool serviceengine controller; do
+       echo "Testing $endpoint for tenant $tenant..."
+       curl -k -b cookies.txt -H "X-Avi-Tenant-UUID: $tenant" \
+         "https://${AVI_CONTROLLER_IP}/api/analytics/metrics/$endpoint?metric_id=l4_server.avg_complete_conns&step=300&limit=1&include_name=true" \
+         | jq '.count'
+     done
    done
    ```
 
@@ -310,10 +319,10 @@ Container keeps restarting
    urls = ["https://${AVI_CONTROLLER_IP}/api/analytics/metrics/virtualservice?metric_id=...&step=300&limit=10"]
    ```
 
-3. **Split Configurations**
-   - Create separate inputs for each metric type
-   - Use different collection intervals
-   - Implement retry logic
+3. **Check Collector Runtime**
+   - Tune `AVI_REQUEST_TIMEOUT_SECONDS` and `AVI_TOTAL_TIMEOUT_SECONDS`
+   - Verify `AVI_TENANT_SCOPE_MODE` if a controller version requires specific tenant scoping
+   - Review Telegraf logs for per-tenant errors (collection continues for other tenants)
 
 ### 8. Performance Issues
 
@@ -326,22 +335,14 @@ Container keeps restarting
 
 1. **Optimize Timeouts**
    ```toml
-   timeout = "60s"
+   AVI_REQUEST_TIMEOUT_SECONDS=20
+   AVI_TOTAL_TIMEOUT_SECONDS=55
    ```
 
-2. **Parallel Collection**
-   ```toml
-   # Use multiple HTTP inputs with different intervals
-   [[inputs.http]]
-   name_override = "avi_critical_metrics"
-   interval = "30s"
-   # ... configuration for critical metrics
-   
-   [[inputs.http]]  
-   name_override = "avi_detailed_metrics"
-   interval = "300s" 
-   # ... configuration for detailed metrics
-   ```
+2. **Tenant Scope Tuning**
+   - Set `AVI_TENANT_SCOPE_MODE=query_uuid` if your controller requires query scoping
+   - Set `AVI_TENANT_SCOPE_MODE=header_uuid` if your controller expects tenant headers
+   - Keep `auto` when unsure (collector tries supported methods)
 
 3. **Resource Allocation**
    ```bash
@@ -389,6 +390,9 @@ docker-compose -f docker-compose.testing.yml up -d
 
 # Test mock endpoints
 python test-mock-avi.py
+
+# Run dynamic multi-tenant collector against the mock server
+AVI_CONTROLLER_IP=localhost:8443 AVI_USERNAME=admin AVI_PASSWORD=admin123 AVI_INSECURE_SKIP_VERIFY=true python avi-tenant-metrics.py
 
 # Compare with real AVI responses (log in first, then reuse the cookie)
 curl -k -c cookies.txt -X POST https://localhost:8443/login \
@@ -489,5 +493,5 @@ When reporting issues, include:
 
 4. **Alternative Collection**
    - Use minimal configuration for critical metrics only
-   - Implement manual data collection scripts as backup
+   - Run `avi-tenant-metrics.py` manually to isolate Telegraf vs API issues
    - Set up monitoring alerts for service failures

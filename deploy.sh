@@ -10,6 +10,14 @@ GREEN='\033[0;32m'
 YELLOW='\033[1;33m'
 NC='\033[0m' # No Color
 
+docker_compose() {
+    if command -v docker-compose &> /dev/null; then
+        docker-compose "$@"
+    else
+        docker compose "$@"
+    fi
+}
+
 # Function to print colored output
 print_status() {
     echo -e "${GREEN}[INFO]${NC} $1"
@@ -30,7 +38,7 @@ check_docker() {
         exit 1
     fi
     
-    if ! command -v docker-compose &> /dev/null; then
+    if ! command -v docker-compose &> /dev/null && ! docker compose version &> /dev/null; then
         print_error "Docker Compose is not installed. Please install Docker Compose first."
         exit 1
     fi
@@ -101,6 +109,7 @@ create_logs_dir() {
         mkdir -p logs
         print_status "Created logs directory"
     fi
+    chmod 777 logs
 }
 
 # Test AVI Controller connectivity
@@ -145,31 +154,31 @@ test_avi_connectivity() {
 start_services() {
     print_status "Starting Telegraf container..."
     
-    # Pull latest image
-    docker-compose pull
+    # Build/pull image layers (telegraf image includes Python runtime for exec input)
+    docker_compose build --pull telegraf
     
     # Start services
-    docker-compose up -d
+    docker_compose up -d
     
     # Wait a moment for container to start
     sleep 5
     
     # Check container status
-    if docker-compose ps | grep -q "Up"; then
+    if docker_compose ps | grep -q "Up"; then
         print_status "Telegraf container started successfully"
         
         # Show logs
         print_status "Container logs (last 20 lines):"
-        docker-compose logs --tail=20 telegraf
+        docker_compose logs --tail=20 telegraf
         
-        print_status "To monitor logs in real-time, run: docker-compose logs -f telegraf"
-        print_status "To check container status, run: docker-compose ps"
-        print_status "To stop the service, run: docker-compose down"
+        print_status "To monitor logs in real-time, run: docker compose logs -f telegraf"
+        print_status "To check container status, run: docker compose ps"
+        print_status "To stop the service, run: docker compose down"
         
     else
         print_error "Failed to start Telegraf container"
         print_error "Container logs:"
-        docker-compose logs telegraf
+        docker_compose logs telegraf
         exit 1
     fi
 }
@@ -177,22 +186,22 @@ start_services() {
 # Stop services
 stop_services() {
     print_status "Stopping Telegraf container..."
-    docker-compose down
+    docker_compose down
     print_status "Services stopped"
 }
 
 # Show status
 show_status() {
     print_status "Container status:"
-    docker-compose ps
+    docker_compose ps
     
     print_status "Recent logs:"
-    docker-compose logs --tail=10 telegraf
+    docker_compose logs --tail=10 telegraf
 }
 
 # Show logs
 show_logs() {
-    docker-compose logs -f telegraf
+    docker_compose logs -f telegraf
 }
 
 # Main script logic

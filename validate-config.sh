@@ -67,6 +67,7 @@ main() {
     print_section "Required Files"
     
     check_file_exists "telegraf.conf" || ((errors++))
+    check_file_exists "avi-tenant-metrics.py" || ((errors++))
     check_file_exists "docker-compose.yml" || ((errors++))
     check_file_exists ".env.example" || ((errors++))
     
@@ -98,6 +99,12 @@ main() {
         else
             print_warning "LOCATION using default value"
         fi
+
+        if [ -n "$AVI_TENANT_SCOPE_MODE" ]; then
+            print_success "AVI_TENANT_SCOPE_MODE is set to: $AVI_TENANT_SCOPE_MODE"
+        else
+            print_warning "AVI_TENANT_SCOPE_MODE not set (default auto will be used)"
+        fi
         
     else
         print_error ".env file not found"
@@ -125,6 +132,8 @@ main() {
     
     if command -v docker-compose &> /dev/null; then
         print_success "Docker Compose is installed"
+    elif docker compose version &> /dev/null; then
+        print_success "Docker Compose plugin is installed"
     else
         print_error "Docker Compose is not installed"
         ((errors++))

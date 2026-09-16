@@ -73,21 +73,25 @@ logs:
 # Clean up everything
 clean:
 	@echo "Cleaning up..."
-	@docker-compose down -v --remove-orphans 2>/dev/null || true
+	@docker compose down -v --remove-orphans 2>/dev/null || true
 	@docker system prune -f
 	@echo "Cleanup complete"
 
 # Advanced: Pull latest images
 update:
 	@echo "Updating Telegraf image..."
-	@docker-compose pull
+	@docker compose pull
 	@echo "Update complete. Run 'make restart' to use new image"
 
 # Development: Check configuration syntax
 check-config:
 	@echo "Checking Telegraf configuration syntax..."
-	@docker run --rm -v "$(PWD)/telegraf.conf:/etc/telegraf/telegraf.conf:ro" \
-		telegraf:1.29-alpine telegraf --config /etc/telegraf/telegraf.conf --test
+	@docker build -f Dockerfile.telegraf -t tele-avi-telegraf-test .
+	@docker run --rm \
+		-v "$(PWD)/telegraf.conf:/etc/telegraf/telegraf.conf:ro" \
+		-v "$(PWD)/avi-tenant-metrics.py:/etc/telegraf/avi-tenant-metrics.py:ro" \
+		-e AVI_COLLECTOR_VALIDATE_ONLY=true \
+		tele-avi-telegraf-test telegraf --config /etc/telegraf/telegraf.conf --test
 
 # Development: Generate sample data
 sample:
@@ -97,7 +101,9 @@ sample:
 # Mock server testing commands
 mock-start:
 	@echo "Starting mock AVI server and Telegraf for testing..."
-	@docker-compose -f docker-compose.testing.yml up --build -d
+	@mkdir -p logs
+	@chmod 777 logs
+	@docker compose -f docker-compose.testing.yml up --build -d
 	@echo "Waiting for services to start..."
 	@sleep 10
 	@echo "Mock environment started!"
@@ -106,7 +112,7 @@ mock-start:
 
 mock-stop:
 	@echo "Stopping mock testing environment..."
-	@docker-compose -f docker-compose.testing.yml down -v
+	@docker compose -f docker-compose.testing.yml down -v
 	@echo "Mock environment stopped"
 
 mock-test:
@@ -115,10 +121,10 @@ mock-test:
 
 mock-logs:
 	@echo "Mock AVI server logs:"
-	@docker-compose -f docker-compose.testing.yml logs mock-avi
+	@docker compose -f docker-compose.testing.yml logs mock-avi
 	@echo ""
 	@echo "Telegraf logs:"
-	@docker-compose -f docker-compose.testing.yml logs telegraf
+	@docker compose -f docker-compose.testing.yml logs telegraf
 
 test-all: mock-start
 	@echo "Running complete end-to-end test..."
@@ -126,7 +132,7 @@ test-all: mock-start
 	@make mock-test
 	@echo ""
 	@echo "Testing Telegraf data collection..."
-	@docker-compose -f docker-compose.testing.yml logs --tail=20 telegraf
+	@docker compose -f docker-compose.testing.yml logs --tail=20 telegraf
 	@echo ""
 	@echo "✅ End-to-end testing complete!"
 	@echo "To stop the test environment: make mock-stop"

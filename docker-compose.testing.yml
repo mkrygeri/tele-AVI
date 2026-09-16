@@ -28,7 +28,10 @@ services:
 
   telegraf:
     container_name: avi-telegraf-testing
-    image: 'telegraf:1.29-alpine'
+    user: "0:0"
+    build:
+      context: .
+      dockerfile: Dockerfile.telegraf
     depends_on:
       - mock-avi
     environment:
@@ -37,18 +40,25 @@ services:
       - AVI_USERNAME=admin
       - AVI_PASSWORD=admin123
       - AVI_DEVICE_NAME=mock-avi
-      
+
       # Kentik Configuration (still need real values)
       - KENTIK_API_ENDPOINT=${KENTIK_API_ENDPOINT:-https://grpc.api.kentik.com/kmetrics/v202207/metrics/api/v2/write?bucket=&org=&precision=ns}
       - KENTIK_API_TOKEN=${KENTIK_API_TOKEN:-your-kentik-token-here}
       - KENTIK_API_EMAIL=${KENTIK_API_EMAIL:-your-email@company.com}
-      
+
       # Environment Tags
       - ENVIRONMENT=testing
       - LOCATION=mock-environment
-      
+
+      # Collector tuning (mock uses self-signed TLS)
+      - AVI_INSECURE_SKIP_VERIFY=true
+      - AVI_TENANT_SCOPE_MODE=auto
+      - AVI_REQUEST_TIMEOUT_SECONDS=8
+      - AVI_TOTAL_TIMEOUT_SECONDS=20
+
     volumes:
       - './telegraf.conf:/etc/telegraf/telegraf.conf:ro'
+      - './avi-tenant-metrics.py:/etc/telegraf/avi-tenant-metrics.py:ro'
       - './logs:/var/log/telegraf'
     restart: unless-stopped
     networks:
