@@ -9,6 +9,7 @@ import time
 from collections import defaultdict
 from datetime import datetime, timezone
 from typing import Dict, Iterable, List, Tuple
+from urllib.parse import parse_qsl, urlsplit
 
 import requests
 import urllib3
@@ -106,6 +107,11 @@ def require_env(name: str) -> str:
     return value
 
 
+def csv_env_set(name: str) -> set[str]:
+    value = os.getenv(name, "")
+    return {item.strip().casefold() for item in value.split(",") if item.strip()}
+
+
 def to_ns(timestamp: str | None) -> int:
     if not timestamp:
         return time.time_ns()
@@ -191,6 +197,9 @@ class AviCollector:
         self.tenant_name_query_param = os.getenv(
             "AVI_TENANT_NAME_QUERY_PARAM", "tenant"
         )
+        self.tenant_allowlist = csv_env_set("AVI_TENANT_ALLOWLIST")
+        self.tenant_denylist = csv_env_set("AVI_TENANT_DENYLIST")
+        self.metric_batching = bool_env("AVI_METRIC_BATCHING", True)
 
         self.session = requests.Session()
 
@@ -221,15 +230,39 @@ class AviCollector:
         )
 
     def list_tenants(self) -> List[Dict[str, str]]:
-        response = self._request("GET", "/api/tenant")
-        payload = response.json()
+        path = "/api/tenant"
+        params: Dict[str, str] | None = {"page_size": "200"}
+        headers = {self.tenant_name_header: "admin"}
         tenants: List[Dict[str, str]] = []
-        for item in payload.get("results", []):
-            tenant_uuid = item.get("uuid")
-            if not tenant_uuid:
-                continue
-            tenant_name = item.get("name") or tenant_uuid
-            tenants.append({"uuid": str(tenant_uuid), "name": str(tenant_name)})
+        while path:
+            response = self._request("GET", path, params=params, headers=headers)
+            payload = response.json()
+            for item in payload.get("results", []):
+                tenant_uuid = item.get("uuid")
+                if not tenant_uuid:
+                    continue
+                tenant_name = item.get("name") or tenant_uuid
+                tenants.append({"uuid": str(tenant_uuid), "name": str(tenant_name)})
+
+            next_url = payload.get("next")
+            if not next_url:
+                break
+            parsed = urlsplit(str(next_url))
+            path = parsed.path or "/api/tenant"
+            params = dict(parse_qsl(parsed.query, keep_blank_values=True))
+
+        if self.tenant_allowlist:
+            tenants = [
+                tenant
+                for tenant in tenants
+                if tenant["name"].casefold() in self.tenant_allowlist
+            ]
+        if self.tenant_denylist:
+            tenants = [
+                tenant
+                for tenant in tenants
+                if tenant["name"].casefold() not in self.tenant_denylist
+            ]
         return tenants
 
     def _scope_attempts(self) -> Iterable[str]:
@@ -253,17 +286,65 @@ class AviCollector:
         elif scope == "query_name":
             params[self.tenant_name_query_param] = tenant["name"]
 
-    def fetch_endpoint(
-        self, endpoint: str, tenant: Dict[str, str]
-    ) -> Dict[str, object]:
+    @staticmethod
+    def _payload_stats(payload: Dict[str, object]) -> Tuple[int, int, int]:
+        total_series = 0
+        data_series = 0
+        total_points = 0
+        for result in payload.get("results", []):
+            if not isinstance(result, dict):
+                continue
+            for series in result.get("series", []):
+                if not isinstance(series, dict):
+                    continue
+                total_series += 1
+                data_points = series.get("data", [])
+                if not data_points:
+                    continue
+                data_series += 1
+                total_points += sum(
+                    1
+                    for point in data_points
+                    if isinstance(point, dict) and "value" in point
+                )
+        return total_series, data_series, total_points
+
+    @staticmethod
+    def _merge_payloads(payloads: List[Dict[str, object]]) -> Dict[str, object]:
+        merged_results: Dict[str, Dict[str, object]] = {}
+        for payload in payloads:
+            for result in payload.get("results", []):
+                entity_uuid = str(result.get("entity_uuid") or "")
+                key = entity_uuid or f"entity-{len(merged_results)}"
+                if key not in merged_results:
+                    merged_results[key] = {
+                        "entity_uuid": result.get("entity_uuid"),
+                        "series": [],
+                    }
+                merged_results[key]["series"].extend(result.get("series", []))
+        return {"count": len(merged_results), "results": list(merged_results.values())}
+
+    @staticmethod
+    def _metric_groups(metric_ids: List[str]) -> List[List[str]]:
+        grouped: Dict[str, List[str]] = {}
+        for metric_id in metric_ids:
+            prefix = metric_id.split(".", 1)[0]
+            grouped.setdefault(prefix, []).append(metric_id)
+        return list(grouped.values())
+
+    def _fetch_metric_ids(
+        self, endpoint: str, tenant: Dict[str, str], metric_ids: List[str]
+    ) -> Tuple[Dict[str, object], str]:
         params = {
-            "metric_id": ",".join(METRIC_IDS[endpoint]),
+            "metric_id": ",".join(metric_ids),
             "step": "300",
             "limit": "1",
             "include_name": "true",
         }
 
         last_error: Exception | None = None
+        last_empty_payload: Dict[str, object] | None = None
+        last_empty_scope = ""
         for scope in self._scope_attempts():
             req_params = dict(params)
             headers: Dict[str, str] = {}
@@ -275,15 +356,101 @@ class AviCollector:
                     params=req_params,
                     headers=headers,
                 )
-                return response.json()
+                payload = response.json()
+                _, data_series, _ = self._payload_stats(payload)
+                if data_series > 0:
+                    return payload, scope
+
+                if self.scope_mode != "auto":
+                    print(
+                        f"WARNING: empty metrics payload for tenant {tenant['name']} "
+                        f"({tenant['uuid']}), endpoint={endpoint}, scope={scope}",
+                        file=sys.stderr,
+                    )
+                    return payload, scope
+
+                last_empty_payload = payload
+                last_empty_scope = scope
             except Exception as exc:  # noqa: BLE001
                 last_error = exc
                 if self.scope_mode != "auto":
                     break
 
+        if last_empty_payload is not None:
+            if last_error is not None:
+                print(
+                    f"WARNING: no data in auto scope attempts for tenant "
+                    f"{tenant['name']} ({tenant['uuid']}), endpoint={endpoint}; "
+                    f"last error={last_error}",
+                    file=sys.stderr,
+                )
+            return last_empty_payload, last_empty_scope
+
         if last_error is None:
             raise RuntimeError("metrics request failed without error")
         raise last_error
+
+    def fetch_endpoint(
+        self, endpoint: str, tenant: Dict[str, str]
+    ) -> Tuple[Dict[str, object], str]:
+        metric_ids = METRIC_IDS[endpoint]
+        grouped_metric_ids = self._metric_groups(metric_ids)
+        combined_error: Exception | None = None
+        combined_payload: Dict[str, object] | None = None
+        combined_scope = "none"
+
+        try:
+            payload, scope = self._fetch_metric_ids(endpoint, tenant, metric_ids)
+            combined_payload = payload
+            combined_scope = scope
+            _, data_series, _ = self._payload_stats(payload)
+            if data_series > 0 or not self.metric_batching or len(grouped_metric_ids) <= 1:
+                return payload, scope
+            print(
+                f"WARNING: empty combined metric payload for tenant {tenant['name']} "
+                f"({tenant['uuid']}), endpoint={endpoint}; trying metric batching",
+                file=sys.stderr,
+            )
+        except Exception as exc:  # noqa: BLE001
+            if not self.metric_batching or len(grouped_metric_ids) <= 1:
+                raise
+            combined_error = exc
+            print(
+                f"WARNING: combined metrics request failed for tenant {tenant['name']} "
+                f"({tenant['uuid']}), endpoint={endpoint}; trying metric batching: {exc}",
+                file=sys.stderr,
+            )
+
+        batched_payloads: List[Dict[str, object]] = []
+        successful_scopes: List[str] = []
+        for metric_group in grouped_metric_ids:
+            try:
+                payload, scope = self._fetch_metric_ids(endpoint, tenant, metric_group)
+                _, data_series, _ = self._payload_stats(payload)
+                if data_series <= 0:
+                    continue
+                batched_payloads.append(payload)
+                successful_scopes.append(scope)
+            except TimeoutError:
+                raise
+            except Exception as exc:  # noqa: BLE001
+                print(
+                    f"WARNING: metric batch request failed for tenant "
+                    f"{tenant['name']} ({tenant['uuid']}), endpoint={endpoint}, "
+                    f"metric_ids={','.join(metric_group)}: {exc}",
+                    file=sys.stderr,
+                )
+
+        if not batched_payloads:
+            if combined_error is not None:
+                raise combined_error
+            if combined_payload is not None:
+                return combined_payload, combined_scope
+            return {"count": 0, "results": []}, "none"
+
+        merged = self._merge_payloads(batched_payloads)
+        deduped_scopes = sorted({scope for scope in successful_scopes if scope})
+        return merged, "+".join(deduped_scopes) if deduped_scopes else "none"
 
 
 def build_line_protocol(
@@ -385,11 +552,22 @@ def main() -> int:
     tenant_lookup = {tenant["uuid"]: tenant["name"] for tenant in tenants}
     lines: List[str] = []
     successful_requests = 0
+    deadline_hit = False
 
     for tenant in tenants:
         for endpoint in MEASUREMENTS:
             try:
-                payload = collector.fetch_endpoint(endpoint, tenant)
+                payload, successful_scope = collector.fetch_endpoint(endpoint, tenant)
+                series_count, data_series_count, point_count = collector._payload_stats(
+                    payload
+                )
+                print(
+                    f"INFO: tenant={tenant['name']} ({tenant['uuid']}), "
+                    f"endpoint={endpoint}, scope={successful_scope}, "
+                    f"series={series_count}, data_series={data_series_count}, "
+                    f"points={point_count}",
+                    file=sys.stderr,
+                )
                 lines.extend(
                     build_line_protocol(tenant_lookup, endpoint, tenant, payload)
                 )
@@ -400,6 +578,7 @@ def main() -> int:
                     f"{tenant['uuid']}: {exc}",
                     file=sys.stderr,
                 )
+                deadline_hit = True
                 break
             except Exception as exc:  # noqa: BLE001
                 print(
@@ -407,6 +586,12 @@ def main() -> int:
                     f"{tenant['uuid']} ({tenant['name']}): {exc}",
                     file=sys.stderr,
                 )
+        if deadline_hit:
+            print(
+                "WARNING: overall collection deadline reached; emitting partial results",
+                file=sys.stderr,
+            )
+            break
 
     if lines:
         print("\n".join(lines))
