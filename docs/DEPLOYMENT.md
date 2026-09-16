@@ -174,13 +174,17 @@ Deploy multiple Telegraf instances behind a load balancer:
 version: '3.8'
 services:
   telegraf-1:
-    image: telegraf:1.29-alpine
+    build:
+      context: .
+      dockerfile: Dockerfile.telegraf
     environment:
       - TELEGRAF_INSTANCE_ID=telegraf-1
     # ... other configuration
   
   telegraf-2:
-    image: telegraf:1.29-alpine  
+    build:
+      context: .
+      dockerfile: Dockerfile.telegraf
     environment:
       - TELEGRAF_INSTANCE_ID=telegraf-2
     # ... other configuration

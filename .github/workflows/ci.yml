@@ -37,6 +37,16 @@ jobs:
           -v $(pwd)/avi-tenant-metrics.py:/etc/telegraf/avi-tenant-metrics.py:ro \
           -e AVI_COLLECTOR_VALIDATE_ONLY=true \
           tele-avi-telegraf-test telegraf --config /etc/telegraf/telegraf.conf --test
+
+    - name: Validate Telegraf Python runtime
+      run: |
+        docker run --rm \
+          -v $(pwd)/avi-tenant-metrics.py:/etc/telegraf/avi-tenant-metrics.py:ro \
+          tele-avi-telegraf-test sh -ec '
+            python3 --version
+            python3 -c "import requests, urllib3"
+            AVI_COLLECTOR_VALIDATE_ONLY=true python3 /etc/telegraf/avi-tenant-metrics.py
+          '
     
     - name: Build Docker images
       run: |
