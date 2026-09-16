@@ -167,8 +167,14 @@ tele-AVI/
 | `LOCATION` | Physical Location | `us-west-1` |
 | `AVI_INSECURE_SKIP_VERIFY` | Skip TLS verification for AVI API | `true` |
 | `AVI_TENANT_SCOPE_MODE` | Tenant scoping mode (`auto`, `header_uuid`, `header_name`, `query_uuid`, `query_name`) | `auto` |
+| `AVI_TENANT_ALLOWLIST` | Optional comma-separated tenant names to include | `admin,tenant-blue` |
+| `AVI_TENANT_DENYLIST` | Optional comma-separated tenant names to exclude | `tenant-sandbox` |
+| `AVI_METRIC_BATCHING` | Split metric queries by metric prefix when combined requests return empty/fail | `true` |
 | `AVI_REQUEST_TIMEOUT_SECONDS` | Per-request timeout for collector | `15` |
 | `AVI_TOTAL_TIMEOUT_SECONDS` | Max runtime per collector invocation | `50` |
+
+`AVI_TENANT_ALLOWLIST` and `AVI_TENANT_DENYLIST` are applied after tenant discovery, so
+the collector still discovers all tenants first (including paginated tenant results).
 
 ### TLS Configuration
 
