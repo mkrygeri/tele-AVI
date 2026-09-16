@@ -338,6 +338,14 @@ tar -czf "$BACKUP_DIR/../telegraf-backup-$(date +%Y%m%d).tar.gz" -C "$BACKUP_DIR
    - Check certificate expiration
    - Verify CA chain
 
+4. **`python3: not found` in Telegraf container**
+   - Cause: a stale cached Telegraf image built before Python was added
+   - Fix:
+     ```bash
+     docker compose build --no-cache telegraf
+     docker compose up -d
+     ```
+
 ### Debug Mode
 
 Enable debug logging:
