@@ -62,14 +62,15 @@ analytics by default):
 ### Metric Parsing
 
 The AVI analytics response nests each metric under `results[].series[]`, where a
-`header` object carries the metric name / entity UUID and a `data` array carries
+`header` object carries the metric name and identity UUIDs (`entity_uuid`,
+`pool_uuid`, `serviceengine_uuid`, `tenant_uuid`) and a `data` array carries
 the timestamped values. Parsing uses the `json_v2` **object** parser:
 
 ```toml
 [[inputs.http.json_v2]]
   [[inputs.http.json_v2.object]]
     path = "results.#.series|@flatten"
-    tags = ["header_name", "header_entity_uuid"]
+    tags = ["header_name", "header_entity_uuid", "header_pool_uuid", "header_serviceengine_uuid", "header_tenant_uuid"]
     timestamp_key = "data_timestamp"
     timestamp_format = "2006-01-02T15:04:05Z07:00"
     included_keys = ["data_value"]
@@ -119,6 +120,9 @@ Measurement names follow an OpenConfig-style path:
 | `device_name` | `${AVI_DEVICE_NAME}` | `avi-controller-01` |
 | `ip_address` | `${AVI_CONTROLLER_IP}` | `198.47.119.104` |
 | `entity_uuid` | AVI series header | `virtualservice-web-app-uuid-1234` |
+| `pool_uuid` | AVI series header (when present) | `pool-web-app-uuid-9876` |
+| `serviceengine_uuid` | AVI series header (when present) | `serviceengine-uuid-4567` |
+| `tenant_uuid` | AVI series header (when present) | `tenant-admin-uuid-0001` |
 | `environment` | `${ENVIRONMENT}` | `production` |
 | `location` | `${LOCATION}` | `datacenter-east` |
 | `vendor` | static | `VMware` |
