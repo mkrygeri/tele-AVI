@@ -31,7 +31,12 @@ jobs:
     
     - name: Validate Telegraf configuration
       run: |
-        docker run --rm -v $(pwd)/telegraf.conf:/telegraf.conf telegraf:1.29-alpine telegraf --config /telegraf.conf --test
+        docker build -f Dockerfile.telegraf -t tele-avi-telegraf-test .
+        docker run --rm \
+          -v $(pwd)/telegraf.conf:/etc/telegraf/telegraf.conf:ro \
+          -v $(pwd)/avi-tenant-metrics.py:/etc/telegraf/avi-tenant-metrics.py:ro \
+          -e AVI_COLLECTOR_VALIDATE_ONLY=true \
+          tele-avi-telegraf-test telegraf --config /etc/telegraf/telegraf.conf --test
     
     - name: Build Docker images
       run: |

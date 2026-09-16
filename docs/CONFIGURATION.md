@@ -22,6 +22,10 @@ This guide provides detailed information on configuring the AVI Load Balancer to
 | `KENTIK_API_ENDPOINT` | Kentik API endpoint | `https://grpc.api.kentik.com/kmetrics/v202207/metrics/api/v2/write?bucket=&org=&precision=ns` | Regional endpoints available |
 | `ENVIRONMENT` | Environment tag | `production` | Used for metric tagging |
 | `LOCATION` | Location tag | `datacenter-1` | Used for metric tagging |
+| `AVI_INSECURE_SKIP_VERIFY` | Skip TLS certificate verification for AVI API | `true` | Set to `false` for production PKI |
+| `AVI_TENANT_SCOPE_MODE` | Tenant scoping mechanism | `auto` | `auto`, `header_uuid`, `header_name`, `query_uuid`, `query_name` |
+| `AVI_REQUEST_TIMEOUT_SECONDS` | Per-request timeout for collector | `15` | Upper bound for each API request |
+| `AVI_TOTAL_TIMEOUT_SECONDS` | Total collector runtime timeout | `50` | Prevents hanging beyond one interval |
 
 ## Telegraf Configuration
 
@@ -37,48 +41,25 @@ This guide provides detailed information on configuring the AVI Load Balancer to
 
 ### AVI API Configuration
 
-Each AVI endpoint is configured as an HTTP input. Authentication uses **session
-login**: Telegraf performs a `POST /login` with a JSON body and reuses the
-returned session cookie (the AVI API does not accept HTTP Basic Auth for
-analytics by default):
+Telegraf uses a single `[[inputs.exec]]` entry to run `avi-tenant-metrics.py`.
+The script performs session login once (`POST /login`), discovers tenants
+dynamically (`GET /api/tenant`), then polls the four analytics endpoints once
+per tenant in the same run:
 
 ```toml
-[[inputs.http]]
-  name_override = "/devices/avi/virtualservice"
-  urls = ["https://${AVI_CONTROLLER_IP}/api/analytics/metrics/virtualservice?..."]
-  method = "GET"
-  timeout = "30s"
-
-  cookie_auth_url = "https://${AVI_CONTROLLER_IP}/login"
-  cookie_auth_method = "POST"
-  cookie_auth_body = '{"username":"${AVI_USERNAME}","password":"${AVI_PASSWORD}"}'
-  cookie_auth_renewal = "55m"
-  cookie_auth_headers = {Content-Type = "application/json"}
-
-  insecure_skip_verify = true  # Set to false for production with proper certs
-  data_format = "json_v2"
+[[inputs.exec]]
+  commands = ["python3 /etc/telegraf/avi-tenant-metrics.py"]
+  timeout = "55s"
+  data_format = "influx"
 ```
 
 ### Metric Parsing
 
-The AVI analytics response nests each metric under `results[].series[]`, where a
-`header` object carries the metric name and identity UUIDs (`entity_uuid`,
-`pool_uuid`, `serviceengine_uuid`, `tenant_uuid`) and a `data` array carries
-the timestamped values. Parsing uses the `json_v2` **object** parser:
-
-```toml
-[[inputs.http.json_v2]]
-  [[inputs.http.json_v2.object]]
-    path = "results.#.series|@flatten"
-    tags = ["header_name", "header_entity_uuid", "header_pool_uuid", "header_serviceengine_uuid", "header_tenant_uuid"]
-    timestamp_key = "data_timestamp"
-    timestamp_format = "2006-01-02T15:04:05Z07:00"
-    included_keys = ["data_value"]
-```
-
-The `header_name` tag (the metric id) is later pivoted into a field name by
-`processors.pivot`, and `processors.strings` strips the `controller_stats.`
-prefix and converts remaining dots to underscores.
+The collector script parses `results[].series[]` from AVI responses and emits
+final Influx line protocol directly. It keeps the same wide output shape as the
+previous pipeline: one record per entity per collection cycle, with normalized
+field names (`.` replaced by `_`, and `controller_stats.` trimmed for controller
+fields).
 
 ### Global Tags
 
@@ -97,10 +78,9 @@ All metrics include global tags:
 ## Data Sent to Kentik
 
 Metrics are delivered to Kentik as InfluxDB **line protocol** (`data_format = "influx"`).
-The pipeline reshapes AVI's response into a **wide format**: each metric name becomes
-its own field, and all metrics for a single entity are merged into **one record**
-(via `processors.pivot` + `aggregators.merge`). So every collection cycle produces
-exactly one record per entity.
+The collector script emits a **wide format** directly: each metric name becomes
+its own field, and all metrics for a single entity are merged into **one record**.
+So every collection cycle produces exactly one record per entity.
 
 ### Measurements
 
@@ -123,6 +103,7 @@ Measurement names follow an OpenConfig-style path:
 | `pool_uuid` | AVI series header (when present) | `pool-web-app-uuid-9876` |
 | `serviceengine_uuid` | AVI series header (when present) | `serviceengine-uuid-4567` |
 | `tenant_uuid` | AVI series header (when present) | `tenant-admin-uuid-0001` |
+| `tenant_name` | AVI tenant API/header (when present) | `admin` |
 | `environment` | `${ENVIRONMENT}` | `production` |
 | `location` | `${LOCATION}` | `datacenter-east` |
 | `vendor` | static | `VMware` |
@@ -202,7 +183,8 @@ insecure_skip_verify = false
 
 ### Adding New Metrics
 
-To collect additional metrics, modify the `metric_id` parameter in the API URLs:
+To collect additional metrics, update the `METRIC_IDS` lists in
+`avi-tenant-metrics.py`:
 
 Available AVI metrics include:
 - `l4_server.avg_bandwidth` - Average bandwidth
@@ -212,15 +194,16 @@ Available AVI metrics include:
 
 ### Filtering Data
 
-To collect specific virtual services or pools, add filters to the API URL:
+To collect specific virtual services or pools, add filter parameters in the
+collector's request-building logic (`fetch_endpoint` in `avi-tenant-metrics.py`):
 
-```toml
-urls = ["https://${AVI_CONTROLLER_IP}/api/analytics/metrics/virtualservice?metric_id=...&entity_uuid=specific-vs-uuid"]
+```python
+params["entity_uuid"] = "specific-vs-uuid"
 ```
 
 ### Adjusting Time Range
 
-Modify the `step` parameter to change the aggregation window:
+Modify the collector request params (`step`) to change the aggregation window:
 
 - `step=60` - 1-minute aggregation
 - `step=300` - 5-minute aggregation (default)
@@ -233,8 +216,9 @@ Modify the `step` parameter to change the aggregation window:
 For environments with many virtual services:
 
 1. **Increase timeouts**:
-   ```toml
-   timeout = "60s"
+   ```bash
+   AVI_REQUEST_TIMEOUT_SECONDS=20
+   AVI_TOTAL_TIMEOUT_SECONDS=55
    ```
 
 2. **Adjust batching**:
@@ -243,8 +227,9 @@ For environments with many virtual services:
    metric_buffer_limit = 50000
    ```
 
-3. **Parallel collection**:
-   Configure separate inputs for different metric types
+3. **Tenant scope mode**:
+   Set `AVI_TENANT_SCOPE_MODE` to match your AVI controller version if `auto`
+   does not return tenant-scoped data.
 
 ### Resource Optimization
 
@@ -266,7 +251,17 @@ telegraf --config telegraf.conf --test
 
 ### Connectivity Testing
 
-Test AVI API connectivity (log in first, then reuse the session cookie):
+Test the collector directly (recommended):
+
+```bash
+AVI_CONTROLLER_IP=localhost:8443 \
+AVI_USERNAME=admin \
+AVI_PASSWORD=admin123 \
+AVI_INSECURE_SKIP_VERIFY=true \
+python3 avi-tenant-metrics.py
+```
+
+Or test AVI API connectivity manually (log in first, then reuse the session cookie):
 
 ```bash
 curl -k -c cookies.txt -X POST "https://${AVI_CONTROLLER_IP}/login" \

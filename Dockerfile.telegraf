@@ -1,0 +1,3 @@
+FROM telegraf:1.29-alpine
+
+RUN apk add --no-cache python3 py3-requests

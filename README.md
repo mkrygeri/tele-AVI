@@ -9,6 +9,7 @@ A comprehensive Telegraf configuration for collecting metrics from VMware AVI Lo
 ## 🚀 Features
 
 - **Complete AVI Metrics Collection**: Virtual Services, Pools, Service Engines, and Controller metrics
+- **Dynamic Multi-Tenant Discovery**: Automatically discovers tenants at runtime and polls metrics per tenant
 - **Kentik NMS Integration**: Direct data pipeline to Kentik for network observability  
 - **Production Ready**: Comprehensive configuration with proper tagging and error handling
 - **Mock Testing Environment**: Full testing infrastructure for development and validation
@@ -42,7 +43,7 @@ A comprehensive Telegraf configuration for collecting metrics from VMware AVI Lo
 ```
 AVI Load Balancer → Telegraf → Kentik NMS
      ↑                ↑           ↑
-   REST API      JSON Parser  HTTP Output
+   REST API     Python Collector  HTTP Output
 ```
 
 ## 🚀 Quick Start
@@ -131,7 +132,7 @@ make mock-stop   # Clean up
 - **Realistic Data**: Time-series metrics with variance
 - **Authentication**: AVI session login (`POST /login` → cookie); HTTP Basic Auth accepted as a fallback
 - **HTTPS Support**: Self-signed certificates for testing
-- **Full API Coverage**: All 4 AVI metric endpoints
+- **Full API Coverage**: `/api/tenant` + all 4 AVI metric endpoints
 
 ## 📁 Repository Structure
 
@@ -164,6 +165,10 @@ tele-AVI/
 | `KENTIK_API_TOKEN` | Kentik API Token | `your-api-token` |
 | `ENVIRONMENT` | Deployment Environment | `production` |
 | `LOCATION` | Physical Location | `us-west-1` |
+| `AVI_INSECURE_SKIP_VERIFY` | Skip TLS verification for AVI API | `true` |
+| `AVI_TENANT_SCOPE_MODE` | Tenant scoping mode (`auto`, `header_uuid`, `header_name`, `query_uuid`, `query_name`) | `auto` |
+| `AVI_REQUEST_TIMEOUT_SECONDS` | Per-request timeout for collector | `15` |
+| `AVI_TOTAL_TIMEOUT_SECONDS` | Max runtime per collector invocation | `50` |
 
 ### TLS Configuration
 
@@ -187,7 +192,7 @@ record. Measurements use OpenConfig-style paths (`/devices/avi/<entity>`), and
 field keys are dot-free (`.` → `_`):
 
 ```
-/devices/avi/pool,device_name=avi-controller-01,entity_uuid=pool-web-app-uuid-1234,environment=production,ip_address=198.47.119.104,location=datacenter-1,product=AVI_Load_Balancer,vendor=VMware l4_server_avg_complete_conns=150.5,l4_server_avg_new_established_conns=25.2,l4_server_avg_pool_open_conns=63.1,l4_server_sum_connection_errors=0.4 1693756800000000000
+/devices/avi/pool,device_name=avi-controller-01,entity_uuid=pool-web-app-uuid-1234,environment=production,ip_address=198.47.119.104,location=datacenter-1,product=AVI_Load_Balancer,tenant_name=admin,tenant_uuid=tenant-admin-uuid-0001,vendor=VMware l4_server_avg_complete_conns=150.5,l4_server_avg_new_established_conns=25.2,l4_server_avg_pool_open_conns=63.1,l4_server_sum_connection_errors=0.4 1693756800000000000
 ```
 
 ### Global Tags
@@ -449,21 +454,28 @@ The mock AVI server provides:
 
 ### AVI API Endpoints
 
-The configuration queries the following AVI Controller API endpoints:
+The collector uses this runtime flow on every interval:
 
-- `/api/analytics/metrics/virtualservice` - Virtual service performance metrics
-- `/api/analytics/metrics/pool` - Backend pool metrics  
-- `/api/analytics/metrics/serviceengine` - Service engine resource metrics
-- `/api/analytics/metrics/controller` - Controller cluster metrics
+1. `POST /login` (JSON body with `AVI_USERNAME` / `AVI_PASSWORD`)
+2. `GET /api/tenant` to discover tenants dynamically
+3. For each discovered tenant, query:
+   - `/api/analytics/metrics/virtualservice`
+   - `/api/analytics/metrics/pool`
+   - `/api/analytics/metrics/serviceengine`
+   - `/api/analytics/metrics/controller`
+
+Tenant scoping is configurable with `AVI_TENANT_SCOPE_MODE` (`auto`, `header_uuid`,
+`header_name`, `query_uuid`, `query_name`) to handle controller-version differences.
 
 ### Authentication
 
-Authentication to the AVI Controller uses **session login**: Telegraf's HTTP input
-performs a `POST /login` with a JSON body (`{"username": ..., "password": ...}`) and
-`Content-Type: application/json`, then reuses the returned session cookie for all
-analytics API calls. The cookie is renewed automatically (`cookie_auth_renewal`). The
-AVI API does **not** accept HTTP Basic Auth for analytics by default. For production
-deployments, consider:
+Authentication to the AVI Controller uses **session login**: the
+`avi-tenant-metrics.py` collector performs one `POST /login` per run, stores the
+returned session cookie, and reuses it for all tenant and metrics API calls in that
+run. The AVI API does **not** accept HTTP Basic Auth for analytics by default.
+Credentials come from `AVI_USERNAME` / `AVI_PASSWORD` environment variables.
+
+For production deployments, consider:
 
 - Using certificate-based authentication
 - Storing credentials in a secure secrets management system
@@ -471,10 +483,12 @@ deployments, consider:
 
 ### Data Collection
 
-- **Collection Interval**: 60 seconds (configurable)
+- **Collection Interval**: 60 seconds (configurable in `[agent]`)
 - **Metrics Step**: 300 seconds (5-minute aggregation)
-- **Timeout**: 30 seconds per API call
-- **TLS**: Skip verification enabled (configure properly for production)
+- **Input**: single `[[inputs.exec]]` invocation of `avi-tenant-metrics.py`
+- **Output Shape**: wide-format Influx line protocol (one record per entity)
+- **TLS**: `AVI_INSECURE_SKIP_VERIFY=true` by default (set false in production)
+- **Reliability**: per-tenant errors are logged, and collection continues for other tenants
 
 ### Kentik Integration
 
@@ -488,7 +502,8 @@ Metrics are sent to Kentik using the HTTP output plugin with:
 
 ### Adding More Metrics
 
-To collect additional AVI metrics, modify the `metric_id` parameter in the URLs within `telegraf.conf`. Available metrics include:
+To collect additional AVI metrics, update the `METRIC_IDS` lists in
+`avi-tenant-metrics.py`. Available metrics include:
 
 - `l4_server.avg_bandwidth` - Average bandwidth usage
 - `l7_server.avg_client_data_transfer_time` - Client data transfer time
@@ -497,7 +512,8 @@ To collect additional AVI metrics, modify the `metric_id` parameter in the URLs 
 
 ### Adjusting Collection Frequency
 
-Modify the `interval` setting in the `[agent]` section and the `step` parameter in the API URLs.
+Modify the `interval` setting in `[agent]` and the `step` parameter in
+`avi-tenant-metrics.py`.
 
 ### Custom Tags
 

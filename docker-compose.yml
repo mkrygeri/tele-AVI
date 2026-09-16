@@ -3,13 +3,17 @@ version: '3.8'
 services:
   telegraf:
     container_name: avi-telegraf
-    image: 'telegraf:1.29-alpine'
+    user: "0:0"
+    build:
+      context: .
+      dockerfile: Dockerfile.telegraf
     # Real configuration is read from .env (AVI_*, KENTIK_*, ENVIRONMENT, LOCATION).
     env_file:
       - .env
 
     volumes:
       - './telegraf.conf:/etc/telegraf/telegraf.conf:ro'
+      - './avi-tenant-metrics.py:/etc/telegraf/avi-tenant-metrics.py:ro'
       - './logs:/var/log/telegraf'
     restart: unless-stopped
     networks:
