@@ -29,88 +29,126 @@ TENANTS = [
 ]
 TENANT_BY_NAME = {tenant["name"]: tenant["uuid"] for tenant in TENANTS}
 
-ENTITIES = {
-    "virtualservice": [
-        {
-            "name": "web-app-vs",
-            "uuid": "virtualservice-web-app-uuid-1234",
-            "tenant": TENANTS[0]["uuid"],
-            "tenant_name": TENANTS[0]["name"],
-        },
-        {
-            "name": "api-vs",
-            "uuid": "virtualservice-api-uuid-5678",
-            "tenant": TENANTS[1]["uuid"],
-            "tenant_name": TENANTS[1]["name"],
-        },
-        {
-            "name": "mobile-vs",
-            "uuid": "virtualservice-mobile-uuid-9012",
-            "tenant": TENANTS[2]["uuid"],
-            "tenant_name": TENANTS[2]["name"],
-        },
-    ],
-    "pool": [
-        {
-            "name": "web-app-pool",
-            "uuid": "pool-web-app-uuid-1234",
-            "tenant": TENANTS[0]["uuid"],
-            "tenant_name": TENANTS[0]["name"],
-        },
-        {
-            "name": "api-pool",
-            "uuid": "pool-api-uuid-5678",
-            "tenant": TENANTS[1]["uuid"],
-            "tenant_name": TENANTS[1]["name"],
-        },
-        {
-            "name": "mobile-pool",
-            "uuid": "pool-mobile-uuid-9012",
-            "tenant": TENANTS[2]["uuid"],
-            "tenant_name": TENANTS[2]["name"],
-        },
-    ],
-    "serviceengine": [
-        {
-            "name": "se-1",
-            "uuid": "serviceengine-uuid-1111",
-            "tenant": TENANTS[0]["uuid"],
-            "tenant_name": TENANTS[0]["name"],
-        },
-        {
-            "name": "se-2",
-            "uuid": "serviceengine-uuid-2222",
-            "tenant": TENANTS[1]["uuid"],
-            "tenant_name": TENANTS[1]["name"],
-        },
-        {
-            "name": "se-3",
-            "uuid": "serviceengine-uuid-3333",
-            "tenant": TENANTS[2]["uuid"],
-            "tenant_name": TENANTS[2]["name"],
-        },
-    ],
-    "controller": [
-        {
-            "name": "avi-controller-admin",
-            "uuid": "controller-admin-uuid-1234",
-            "tenant": TENANTS[0]["uuid"],
-            "tenant_name": TENANTS[0]["name"],
-        },
-        {
-            "name": "avi-controller-blue",
-            "uuid": "controller-blue-uuid-5678",
-            "tenant": TENANTS[1]["uuid"],
-            "tenant_name": TENANTS[1]["name"],
-        },
-        {
-            "name": "avi-controller-green",
-            "uuid": "controller-green-uuid-9012",
-            "tenant": TENANTS[2]["uuid"],
-            "tenant_name": TENANTS[2]["name"],
-        },
+# Cluster / controller identity (a controller cluster is not tenant-scoped).
+CLUSTER = {
+    "uuid": "cluster-avi-uuid-0001",
+    "name": "avi-controller-cluster",
+    "nodes": [
+        {"name": "avi-node-1", "role": "leader"},
+        {"name": "avi-node-2", "role": "follower"},
+        {"name": "avi-node-3", "role": "follower"},
     ],
 }
+
+# Shared topology objects referenced by inventoried entities.
+CLOUD = {"uuid": "cloud-default-uuid", "name": "Default-Cloud"}
+SE_GROUP = {"uuid": "segroup-default-uuid", "name": "Default-Group"}
+HOST = {"uuid": "host-esxi-uuid", "name": "esxi-host-01"}
+
+# Each tenant hosts multiple applications so the mock emulates a realistic
+# multi-tenant controller. Every app yields one virtual service linked to one
+# pool, giving explicit VS<->Pool relationships for enrichment testing.
+APPS_BY_TENANT = {
+    "admin": ["web-app", "checkout", "auth"],
+    "tenant-blue": ["api", "payments"],
+    "tenant-green": ["mobile", "analytics"],
+}
+
+
+def _build_entities():
+    virtualservices = []
+    pools = []
+    serviceengines = []
+    controllers = []
+
+    for tenant in TENANTS:
+        tenant_uuid = tenant["uuid"]
+        tenant_name = tenant["name"]
+        apps = APPS_BY_TENANT.get(tenant_name, [])
+
+        for index, app in enumerate(apps):
+            # Mark one entity per tenant DOWN so state reporting is exercised.
+            oper_state = "OPER_DOWN" if index == len(apps) - 1 else "OPER_UP"
+            vs_uuid = f"virtualservice-{app}-{tenant_name}-uuid"
+            pool_uuid = f"pool-{app}-{tenant_name}-uuid"
+            vs_name = f"{app}-vs"
+            pool_name = f"{app}-pool"
+
+            num_servers = 4
+            num_servers_up = 4 if oper_state == "OPER_UP" else 1
+            health = 92.0 if oper_state == "OPER_UP" else 41.0
+            profile = "APPLICATION_PROFILE_TYPE_HTTP"
+            vip = f"10.{TENANTS.index(tenant)}.{index}.100"
+
+            virtualservices.append(
+                {
+                    "name": vs_name,
+                    "uuid": vs_uuid,
+                    "tenant": tenant_uuid,
+                    "tenant_name": tenant_name,
+                    "oper_status": oper_state,
+                    "enabled": True,
+                    "fqdn": f"{app}.{tenant_name}.example.com",
+                    "pool_uuid": pool_uuid,
+                    "pool_name": pool_name,
+                    "vip": vip,
+                    "health_score": health,
+                    "app_profile_type": profile,
+                }
+            )
+            pools.append(
+                {
+                    "name": pool_name,
+                    "uuid": pool_uuid,
+                    "tenant": tenant_uuid,
+                    "tenant_name": tenant_name,
+                    "oper_status": oper_state,
+                    "num_servers": num_servers,
+                    "num_servers_up": num_servers_up,
+                    "num_servers_enabled": num_servers,
+                    "vs_uuid": vs_uuid,
+                    "vs_name": vs_name,
+                    "health_score": health,
+                    "app_profile_type": profile,
+                }
+            )
+
+        for se_index in range(1, 3):
+            se_state = "OPER_UP"
+            serviceengines.append(
+                {
+                    "name": f"se-{tenant_name}-{se_index}",
+                    "uuid": f"serviceengine-{tenant_name}-{se_index}-uuid",
+                    "tenant": tenant_uuid,
+                    "tenant_name": tenant_name,
+                    "oper_status": se_state,
+                    "enable_state": "SE_STATE_ENABLED",
+                    "mgmt_ip": f"10.{TENANTS.index(tenant)}.{se_index}.10",
+                    "health_score": 95.0,
+                    "vs_uuids": [
+                        f"virtualservice-{app}-{tenant_name}-uuid" for app in apps
+                    ],
+                }
+            )
+
+        controllers.append(
+            {
+                "name": CLUSTER["name"],
+                "uuid": CLUSTER["uuid"],
+                "tenant": tenant_uuid,
+                "tenant_name": tenant_name,
+            }
+        )
+
+    return {
+        "virtualservice": virtualservices,
+        "pool": pools,
+        "serviceengine": serviceengines,
+        "controller": controllers,
+    }
+
+
+ENTITIES = _build_entities()
 
 
 def iso_now() -> str:
@@ -310,6 +348,189 @@ def get_controller_metrics():
     return jsonify(build_results(scoped_entities("controller"), metric_ids))
 
 
+def obj_ref(entity_type: str, entity_uuid: str, name: str | None = None) -> str:
+    base = request.host_url.rstrip("/")
+    ref = f"{base}/api/{entity_type}/{entity_uuid}"
+    if name and request.args.get("include_name", "").lower() in {"true", "1", "yes"}:
+        ref += f"#{name}"
+    return ref
+
+
+def build_vs_inventory(entities):
+    results = []
+    for entity in entities:
+        results.append(
+            {
+                "uuid": entity["uuid"],
+                "url": obj_ref("virtualservice", entity["uuid"], entity["name"]),
+                "app_profile_type": entity.get("app_profile_type"),
+                "config": {
+                    "uuid": entity["uuid"],
+                    "name": entity["name"],
+                    "enabled": entity.get("enabled", True),
+                    "fqdn": entity.get("fqdn"),
+                    "type": "VS_TYPE_NORMAL",
+                    "tenant_ref": obj_ref("tenant", entity["tenant"], entity["tenant_name"]),
+                    "pool_ref": obj_ref(
+                        "pool", entity["pool_uuid"], entity["pool_name"]
+                    ),
+                    "cloud_ref": obj_ref("cloud", CLOUD["uuid"], CLOUD["name"]),
+                    "se_group_ref": obj_ref(
+                        "serviceenginegroup", SE_GROUP["uuid"], SE_GROUP["name"]
+                    ),
+                    "vip": [
+                        {
+                            "vip_id": "1",
+                            "ip_address": {"addr": entity.get("vip"), "type": "V4"},
+                        }
+                    ],
+                },
+                "pools": [
+                    {"ref": obj_ref("pool", entity["pool_uuid"], entity["pool_name"])}
+                ],
+                "health_score": {"health_score": entity.get("health_score", 0)},
+                "alert": {"level": "ALERT_HIGH" if entity.get("oper_status") == "OPER_DOWN" else "ALERT_LOW"},
+                "runtime": {
+                    "oper_status": {"state": entity.get("oper_status", "OPER_UP")},
+                    "percent_ses_up": 100 if entity.get("oper_status") == "OPER_UP" else 50,
+                },
+            }
+        )
+    return {"count": len(results), "results": results}
+
+
+def build_pool_inventory(entities):
+    results = []
+    for entity in entities:
+        results.append(
+            {
+                "uuid": entity["uuid"],
+                "url": obj_ref("pool", entity["uuid"], entity["name"]),
+                "app_profile_type": entity.get("app_profile_type"),
+                "config": {
+                    "uuid": entity["uuid"],
+                    "name": entity["name"],
+                    "tenant_ref": obj_ref("tenant", entity["tenant"], entity["tenant_name"]),
+                    "cloud_ref": obj_ref("cloud", CLOUD["uuid"], CLOUD["name"]),
+                },
+                "virtualservices": [
+                    {
+                        "ref": obj_ref(
+                            "virtualservice", entity["vs_uuid"], entity["vs_name"]
+                        )
+                    }
+                ],
+                "health_score": {"health_score": entity.get("health_score", 0)},
+                "runtime": {
+                    "oper_status": {"state": entity.get("oper_status", "OPER_UP")},
+                    "num_servers": entity.get("num_servers", 0),
+                    "num_servers_up": entity.get("num_servers_up", 0),
+                    "num_servers_enabled": entity.get("num_servers_enabled", 0),
+                    "percent_servers_up_total": int(
+                        100
+                        * entity.get("num_servers_up", 0)
+                        / max(entity.get("num_servers", 1), 1)
+                    ),
+                    "percent_servers_up_enabled": int(
+                        100
+                        * entity.get("num_servers_up", 0)
+                        / max(entity.get("num_servers_enabled", 1), 1)
+                    ),
+                },
+            }
+        )
+    return {"count": len(results), "results": results}
+
+
+def build_se_inventory(entities):
+    results = []
+    for entity in entities:
+        results.append(
+            {
+                "uuid": entity["uuid"],
+                "url": obj_ref("serviceengine", entity["uuid"], entity["name"]),
+                "config": {
+                    "uuid": entity["uuid"],
+                    "name": entity["name"],
+                    "enable_state": entity.get("enable_state", "SE_STATE_ENABLED"),
+                    "mgmt_ip_address": {
+                        "addr": entity.get("mgmt_ip", "0.0.0.0"),
+                        "type": "V4",
+                    },
+                    "cloud_ref": obj_ref("cloud", CLOUD["uuid"], CLOUD["name"]),
+                    "se_group_ref": obj_ref(
+                        "serviceenginegroup", SE_GROUP["uuid"], SE_GROUP["name"]
+                    ),
+                    "host_ref": obj_ref(
+                        "vimgrhostruntime", HOST["uuid"], HOST["name"]
+                    ),
+                    "vs_refs": [
+                        obj_ref("virtualservice", vs_uuid)
+                        for vs_uuid in entity.get("vs_uuids", [])
+                    ],
+                    "tenant_ref": obj_ref("tenant", entity["tenant"], entity["tenant_name"]),
+                },
+                "health_score": {"health_score": entity.get("health_score", 0)},
+                "runtime": {
+                    "oper_status": {"state": entity.get("oper_status", "OPER_UP")},
+                    "power_state": "SE_POWER_ON",
+                    "se_connected": True,
+                },
+            }
+        )
+    return {"count": len(results), "results": results}
+
+
+@app.route("/api/vsinventory", methods=["GET"])
+@app.route("/api/virtualservice-inventory", methods=["GET"])
+@require_session
+def get_vs_inventory():
+    logger.info("VS inventory request: %s", dict(request.args))
+    return jsonify(build_vs_inventory(scoped_entities("virtualservice")))
+
+
+@app.route("/api/poolinventory", methods=["GET"])
+@app.route("/api/pool-inventory", methods=["GET"])
+@require_session
+def get_pool_inventory():
+    logger.info("Pool inventory request: %s", dict(request.args))
+    return jsonify(build_pool_inventory(scoped_entities("pool")))
+
+
+@app.route("/api/serviceengineinventory", methods=["GET"])
+@app.route("/api/serviceengine-inventory", methods=["GET"])
+@require_session
+def get_se_inventory():
+    logger.info("ServiceEngine inventory request: %s", dict(request.args))
+    return jsonify(build_se_inventory(scoped_entities("serviceengine")))
+
+
+@app.route("/api/cluster", methods=["GET"])
+@require_session
+def get_cluster():
+    return jsonify(
+        {
+            "uuid": CLUSTER["uuid"],
+            "name": CLUSTER["name"],
+            "nodes": CLUSTER["nodes"],
+        }
+    )
+
+
+@app.route("/api/cluster/runtime", methods=["GET"])
+@require_session
+def get_cluster_runtime():
+    return jsonify(
+        {
+            "node_states": [
+                {"name": node["name"], "role": node["role"], "state": "CLUSTER_ACTIVE"}
+                for node in CLUSTER["nodes"]
+            ],
+            "cluster_state": {"state": "CLUSTER_UP_HA_ACTIVE"},
+        }
+    )
+
+
 @app.route("/health", methods=["GET"])
 def health_check():
     return jsonify({"status": "healthy", "timestamp": iso_now(), "version": "22.1.4"})
@@ -331,6 +552,11 @@ def index():
                 "/api/analytics/metrics/pool",
                 "/api/analytics/metrics/serviceengine",
                 "/api/analytics/metrics/controller",
+                "/api/vsinventory",
+                "/api/poolinventory",
+                "/api/serviceengineinventory",
+                "/api/cluster",
+                "/api/cluster/runtime",
                 "/health",
             ],
             "authentication": (

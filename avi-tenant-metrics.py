@@ -21,6 +21,41 @@ MEASUREMENTS = {
     "controller": "/devices/avi/controller",
 }
 
+# Inventory endpoints provide the human-readable name, operational state, and
+# object relationships (VS<->Pool) that the analytics metrics API omits.
+# Live 22.1.x controllers use the hyphenated REST paths; the non-hyphenated
+# forms (from the object swagger) 404, so try hyphenated first then fall back.
+INVENTORY_ENDPOINTS = {
+    "virtualservice": ["/api/virtualservice-inventory", "/api/vsinventory"],
+    "pool": ["/api/pool-inventory", "/api/poolinventory"],
+    "serviceengine": ["/api/serviceengine-inventory", "/api/serviceengineinventory"],
+}
+
+# Ordered per the AVI OperationalStatus enum. Index is emitted as
+# oper_status_code so dashboards/alerts can key on a stable numeric value.
+OPER_STATE_ENUM = [
+    "OPER_UP",
+    "OPER_DOWN",
+    "OPER_CREATING",
+    "OPER_RESOURCES",
+    "OPER_INACTIVE",
+    "OPER_DISABLED",
+    "OPER_UNUSED",
+    "OPER_UNKNOWN",
+    "OPER_PROCESSING",
+    "OPER_INITIALIZING",
+    "OPER_ERROR_DISABLED",
+    "OPER_AWAIT_MANUAL_PLACEMENT",
+    "OPER_UPGRADING",
+    "OPER_SE_PROCESSING",
+    "OPER_PARTITIONED",
+    "OPER_DISABLING",
+    "OPER_FAILED",
+    "OPER_UNAVAIL",
+    "OPER_AGGREGATE_DOWN",
+]
+OPER_STATUS_CODE = {name: index for index, name in enumerate(OPER_STATE_ENUM)}
+
 METRIC_IDS = {
     "virtualservice": [
         "l4_server.avg_complete_conns",
@@ -155,6 +190,76 @@ def normalize_metric_name(endpoint: str, name: str) -> str:
     return name.replace(".", "_")
 
 
+def parse_ref(ref: object) -> Tuple[str, str]:
+    """Split an AVI object reference into (uuid, name).
+
+    With include_name=true refs look like
+    https://host/api/pool/pool-<uuid>#pool-name.
+    """
+    if not ref:
+        return "", ""
+    text = str(ref)
+    name = ""
+    if "#" in text:
+        text, name = text.split("#", 1)
+    uuid = text.rstrip("/").rsplit("/", 1)[-1]
+    return uuid, name
+
+
+def oper_status_fields(state: object) -> Dict[str, object]:
+    """Map an OperationalStatus state string to numeric fields for alerting."""
+    fields: Dict[str, object] = {}
+    if not state:
+        return fields
+    text = str(state)
+    fields["up"] = 1 if text == "OPER_UP" else 0
+    if text in OPER_STATUS_CODE:
+        fields["oper_status_code"] = OPER_STATUS_CODE[text]
+    return fields
+
+
+def ref_name(ref: object) -> str:
+    """Return just the #name suffix of an AVI object reference."""
+    return parse_ref(ref)[1]
+
+
+def first_vip_address(config: Dict[str, object]) -> str:
+    """Return the first configured VIP IPv4/IPv6 address, if any."""
+    vips = config.get("vip")
+    if not isinstance(vips, list):
+        return ""
+    for vip in vips:
+        if not isinstance(vip, dict):
+            continue
+        for key in ("ip_address", "ip6_address"):
+            ip = vip.get(key)
+            addr = ip.get("addr") if isinstance(ip, dict) else None
+            if addr:
+                return str(addr)
+    return ""
+
+
+def vs_pool_link(item: Dict[str, object], config: Dict[str, object]) -> Tuple[str, str]:
+    """Resolve a VS's primary pool (uuid, name).
+
+    Falls back from config.pool_ref to the pools[] / poolgroups[] arrays so
+    SNI-child and pool-group virtual services still link to a backend.
+    """
+    pool_uuid, pool_name = parse_ref(config.get("pool_ref"))
+    if pool_uuid:
+        return pool_uuid, pool_name
+    for key in ("pools", "poolgroups"):
+        entries = item.get(key)
+        if isinstance(entries, list):
+            for entry in entries:
+                ref = entry.get("ref") if isinstance(entry, dict) else None
+                pool_uuid, pool_name = parse_ref(ref)
+                if pool_uuid:
+                    return pool_uuid, pool_name
+    return "", ""
+
+
+
 class AviCollector:
     def __init__(self) -> None:
         controller = require_env("AVI_CONTROLLER_IP").strip()
@@ -200,6 +305,17 @@ class AviCollector:
         self.tenant_allowlist = csv_env_set("AVI_TENANT_ALLOWLIST")
         self.tenant_denylist = csv_env_set("AVI_TENANT_DENYLIST")
         self.metric_batching = bool_env("AVI_METRIC_BATCHING", True)
+
+        # Inventory enrichment adds names, operational state, and VS<->Pool
+        # relationships to the analytics metrics.
+        self.collect_inventory = bool_env("AVI_COLLECT_INVENTORY", True)
+        self.api_version = os.getenv("AVI_API_VERSION", "22.1.4").strip() or "22.1.4"
+        self.inventory_page_size = os.getenv("AVI_INVENTORY_PAGE_SIZE", "200")
+        # Cache the inventory REST path that the controller actually serves so we
+        # only probe candidate paths once (they differ across AVI versions).
+        self._inventory_path_cache: Dict[str, str] = {}
+        # Cache global controller (cluster) name/state; fetched once per run.
+        self._cluster_info: Dict[str, Dict[str, object]] | None = None
 
         self.session = requests.Session()
 
@@ -452,14 +568,274 @@ class AviCollector:
         deduped_scopes = sorted({scope for scope in successful_scopes if scope})
         return merged, "+".join(deduped_scopes) if deduped_scopes else "none"
 
+    def _fetch_inventory_scope(
+        self, path: str, tenant: Dict[str, str], scope: str
+    ) -> Tuple[bool, List[Dict[str, object]]] | None:
+        """Fetch one inventory path with one tenant scope.
+
+        Returns ``(not_found, results)`` where ``not_found`` is True when the
+        controller returned 404 (the path form is wrong for this version), or
+        ``None`` on any other error so the caller can try the next scope.
+        """
+        results: List[Dict[str, object]] = []
+        next_path = path
+        params: Dict[str, str] = {
+            "include_name": "true",
+            "page_size": str(self.inventory_page_size),
+        }
+        headers: Dict[str, str] = {"X-Avi-Version": self.api_version}
+        self._add_scope(scope, tenant, headers, params)
+        try:
+            while next_path:
+                response = self._request(
+                    "GET", next_path, params=params, headers=headers
+                )
+                payload = response.json()
+                for item in payload.get("results", []):
+                    if isinstance(item, dict):
+                        results.append(item)
+                next_url = payload.get("next")
+                if not next_url:
+                    break
+                parsed = urlsplit(str(next_url))
+                next_path = parsed.path or path
+                params = dict(parse_qsl(parsed.query, keep_blank_values=True))
+                params.setdefault("include_name", "true")
+            return False, results
+        except requests.HTTPError as exc:
+            status = exc.response.status_code if exc.response is not None else None
+            if status == 404:
+                # Wrong path form for this controller version; signal fallback.
+                return True, []
+            print(
+                f"WARNING: inventory request failed for tenant {tenant['name']} "
+                f"({tenant['uuid']}), path={path}, scope={scope}: {exc}",
+                file=sys.stderr,
+            )
+            return None
+        except Exception as exc:  # noqa: BLE001
+            print(
+                f"WARNING: inventory request failed for tenant {tenant['name']} "
+                f"({tenant['uuid']}), path={path}, scope={scope}: {exc}",
+                file=sys.stderr,
+            )
+            return None
+
+    def fetch_inventory(
+        self, endpoint: str, tenant: Dict[str, str]
+    ) -> Dict[str, Dict[str, Dict[str, object]]]:
+        """Return {entity_uuid: {"tags": {...}, "fields": {...}}} for an endpoint."""
+        candidates = INVENTORY_ENDPOINTS.get(endpoint)
+        if not candidates:
+            return {}
+
+        # Prefer a path we've already confirmed works on this controller.
+        cached = self._inventory_path_cache.get(endpoint)
+        if cached:
+            ordered = [cached] + [p for p in candidates if p != cached]
+        else:
+            ordered = list(candidates)
+
+        for path in ordered:
+            path_found = False
+            for scope in self._scope_attempts():
+                outcome = self._fetch_inventory_scope(path, tenant, scope)
+                if outcome is None:
+                    continue  # transient/other error: try next scope
+                not_found, results = outcome
+                if not_found:
+                    break  # wrong path form: stop scopes, try next candidate
+                path_found = True
+                self._inventory_path_cache[endpoint] = path
+                if results:
+                    return _parse_inventory(endpoint, results)
+                if self.scope_mode != "auto":
+                    return {}
+            if path_found:
+                # Path exists but returned no entities under any scope.
+                return {}
+        print(
+            f"WARNING: no inventory path matched for {endpoint} "
+            f"(tried {', '.join(ordered)}); names/state/relationships unavailable",
+            file=sys.stderr,
+        )
+        return {}
+
+    def fetch_cluster(self) -> Dict[str, Dict[str, object]]:
+        """Return controller (cluster) name + state for enriching controller metrics.
+
+        The controller has no per-tenant inventory endpoint; its friendly name and
+        operational state come from /api/cluster and /api/cluster/runtime. Result is
+        {"tags": {name, cluster_state, controller_node}, "fields": {up, node_count}}.
+        Cached because the cluster is global (not per-tenant).
+        """
+        if self._cluster_info is not None:
+            return self._cluster_info
+
+        info: Dict[str, Dict[str, object]] = {"tags": {}, "fields": {}}
+        headers = {"X-Avi-Version": self.api_version}
+        try:
+            cluster = self._request(
+                "GET", "/api/cluster", headers=headers
+            ).json()
+            name = cluster.get("name")
+            if name:
+                info["tags"]["name"] = str(name)
+            nodes = cluster.get("nodes")
+            if isinstance(nodes, list) and nodes:
+                first = nodes[0] if isinstance(nodes[0], dict) else {}
+                node_name = first.get("name") or (
+                    first.get("ip", {}).get("addr")
+                    if isinstance(first.get("ip"), dict)
+                    else None
+                )
+                if node_name:
+                    info["tags"]["controller_node"] = str(node_name)
+                info["fields"]["node_count"] = len(nodes)
+        except Exception as exc:  # noqa: BLE001
+            print(f"WARNING: /api/cluster fetch failed: {exc}", file=sys.stderr)
+
+        try:
+            runtime = self._request(
+                "GET", "/api/cluster/runtime", headers=headers
+            ).json()
+            state = (runtime.get("cluster_state") or {}).get("state")
+            if state:
+                info["tags"]["cluster_state"] = str(state)
+                info["fields"]["up"] = 1 if str(state).startswith("CLUSTER_UP") else 0
+            if "node_count" not in info["fields"]:
+                count = runtime.get("nodes_count")
+                if isinstance(count, (int, float)):
+                    info["fields"]["node_count"] = int(count)
+        except Exception as exc:  # noqa: BLE001
+            print(f"WARNING: /api/cluster/runtime fetch failed: {exc}", file=sys.stderr)
+
+        self._cluster_info = info
+        return info
+
+
+def _parse_inventory(
+    endpoint: str, results: List[Dict[str, object]]
+) -> Dict[str, Dict[str, Dict[str, object]]]:
+    lookup: Dict[str, Dict[str, Dict[str, object]]] = {}
+    for item in results:
+        config = item.get("config") if isinstance(item.get("config"), dict) else {}
+        runtime = item.get("runtime") if isinstance(item.get("runtime"), dict) else {}
+        entity_uuid = str(item.get("uuid") or config.get("uuid") or "")
+        if not entity_uuid:
+            entity_uuid, _ = parse_ref(item.get("url") or config.get("url"))
+        if not entity_uuid:
+            continue
+
+        tags: Dict[str, object] = {}
+        fields: Dict[str, object] = {}
+
+        name = config.get("name")
+        if name:
+            tags["name"] = str(name)
+
+        oper_status = runtime.get("oper_status")
+        state = oper_status.get("state") if isinstance(oper_status, dict) else None
+        if state:
+            tags["oper_status"] = str(state)
+            fields.update(oper_status_fields(state))
+
+        # Descriptors common to every inventoried entity.
+        health = item.get("health_score")
+        if isinstance(health, dict) and isinstance(
+            health.get("health_score"), (int, float)
+        ):
+            fields["health_score"] = float(health["health_score"])
+        alert = item.get("alert")
+        if isinstance(alert, dict) and alert.get("level"):
+            tags["alert_level"] = str(alert["level"])
+        cloud_name = ref_name(config.get("cloud_ref"))
+        if cloud_name:
+            tags["cloud_name"] = cloud_name
+        app_profile_type = item.get("app_profile_type")
+        if app_profile_type:
+            tags["app_profile_type"] = str(app_profile_type)
+
+        if endpoint == "virtualservice":
+            pool_uuid, pool_name = vs_pool_link(item, config)
+            if pool_uuid:
+                tags["pool_uuid"] = pool_uuid
+            if pool_name:
+                tags["pool_name"] = pool_name
+            fqdn = config.get("fqdn")
+            if fqdn:
+                tags["fqdn"] = str(fqdn)
+            vip = first_vip_address(config)
+            if vip:
+                tags["vip_address"] = vip
+            vs_type = config.get("type")
+            if vs_type:
+                tags["vs_type"] = str(vs_type)
+            se_group_name = ref_name(config.get("se_group_ref"))
+            if se_group_name:
+                tags["se_group_name"] = se_group_name
+            enabled = config.get("enabled")
+            if enabled is not None:
+                fields["admin_enabled"] = 1 if enabled else 0
+            percent_ses_up = runtime.get("percent_ses_up")
+            if isinstance(percent_ses_up, (int, float)):
+                fields["percent_ses_up"] = float(percent_ses_up)
+        elif endpoint == "pool":
+            vslist = item.get("virtualservices")
+            if isinstance(vslist, list) and vslist:
+                first = vslist[0] if isinstance(vslist[0], dict) else {}
+                vs_uuid, vs_name = parse_ref(first.get("ref"))
+                if vs_uuid:
+                    tags["virtualservice_uuid"] = vs_uuid
+                if vs_name:
+                    tags["virtualservice_name"] = vs_name
+                fields["num_virtualservices"] = len(vslist)
+            for key in (
+                "num_servers",
+                "num_servers_up",
+                "num_servers_enabled",
+                "percent_servers_up_total",
+                "percent_servers_up_enabled",
+            ):
+                value = runtime.get(key)
+                if isinstance(value, (int, float)):
+                    fields[key] = float(value)
+        elif endpoint == "serviceengine":
+            enable_state = config.get("enable_state")
+            if enable_state:
+                tags["enable_state"] = str(enable_state)
+                fields["admin_enabled"] = 1 if enable_state == "SE_STATE_ENABLED" else 0
+            mgmt_ip = config.get("mgmt_ip_address")
+            addr = mgmt_ip.get("addr") if isinstance(mgmt_ip, dict) else None
+            if addr:
+                tags["mgmt_ip"] = str(addr)
+            se_group_name = ref_name(config.get("se_group_ref"))
+            if se_group_name:
+                tags["se_group_name"] = se_group_name
+            host_name = ref_name(config.get("host_ref"))
+            if host_name:
+                tags["host_name"] = host_name
+            vs_refs = config.get("vs_refs")
+            if isinstance(vs_refs, list):
+                fields["num_virtualservices"] = len(vs_refs)
+
+        lookup[entity_uuid] = {"tags": tags, "fields": fields}
+    return lookup
+
 
 def build_line_protocol(
     tenant_lookup: Dict[str, str],
     endpoint: str,
     tenant: Dict[str, str],
     payload: Dict[str, object],
+    enrichment: Dict[str, Dict[str, Dict[str, object]]] | None = None,
+    default_tags: Dict[str, object] | None = None,
+    default_fields: Dict[str, object] | None = None,
 ) -> List[str]:
     measurement = MEASUREMENTS[endpoint]
+    enrichment = enrichment or {}
+    default_tags = default_tags or {}
+    default_fields = default_fields or {}
     records: Dict[Tuple[str, Tuple[Tuple[str, str], ...], int], Dict[str, object]] = (
         defaultdict(dict)
     )
@@ -493,6 +869,13 @@ def build_line_protocol(
                 "tenant_uuid": tenant_uuid,
                 "tenant_name": tenant_name,
             }
+            for tag_key, tag_value in default_tags.items():
+                if tag_value is not None and str(tag_value) != "":
+                    tags[tag_key] = tag_value
+            entry = enrichment.get(str(entity_uuid)) if entity_uuid else None
+            if entry:
+                for tag_key, tag_value in entry.get("tags", {}).items():
+                    tags[tag_key] = tag_value
             tag_items = tuple(
                 sorted(
                     (k, str(v))
@@ -511,6 +894,11 @@ def build_line_protocol(
                 except (TypeError, ValueError):
                     continue
 
+    if default_fields:
+        for fields in records.values():
+            for field_key, field_value in default_fields.items():
+                fields.setdefault(field_key, field_value)
+
     lines: List[str] = []
     for (measure, tag_items, timestamp_ns), fields in sorted(
         records.items(), key=lambda item: (item[0][0], item[0][2], item[0][1])
@@ -525,6 +913,53 @@ def build_line_protocol(
             for k, v in sorted(fields.items())
         )
         line = escape_measurement(measure)
+        if tag_text:
+            line += f",{tag_text}"
+        line += f" {field_text} {timestamp_ns}"
+        lines.append(line)
+
+    return lines
+
+
+def build_inventory_lines(
+    tenant_lookup: Dict[str, str],
+    endpoint: str,
+    tenant: Dict[str, str],
+    enrichment: Dict[str, Dict[str, Dict[str, object]]],
+) -> List[str]:
+    """Emit one state record per inventoried entity.
+
+    Ensures every entity carries its name plus numeric state fields (up,
+    oper_status_code, server counts) even when it has no analytics data.
+    """
+    measurement = MEASUREMENTS[endpoint]
+    tenant_uuid = tenant["uuid"]
+    tenant_name = tenant_lookup.get(tenant_uuid, tenant.get("name"))
+    timestamp_ns = time.time_ns()
+
+    lines: List[str] = []
+    for entity_uuid, entry in enrichment.items():
+        fields = entry.get("fields", {})
+        if not fields:
+            continue
+        tags = {
+            "entity_uuid": entity_uuid,
+            "tenant_uuid": tenant_uuid,
+            "tenant_name": tenant_name,
+        }
+        for tag_key, tag_value in entry.get("tags", {}).items():
+            tags[tag_key] = tag_value
+        tag_items = sorted(
+            (k, str(v)) for k, v in tags.items() if v is not None and str(v) != ""
+        )
+        tag_text = ",".join(
+            f"{escape_tag_or_key(k)}={escape_tag_or_key(v)}" for k, v in tag_items
+        )
+        field_text = ",".join(
+            f"{escape_tag_or_key(k)}={encode_field_value(v)}"
+            for k, v in sorted(fields.items())
+        )
+        line = escape_measurement(measurement)
         if tag_text:
             line += f",{tag_text}"
         line += f" {field_text} {timestamp_ns}"
@@ -550,11 +985,62 @@ def main() -> int:
         return 1
 
     tenant_lookup = {tenant["uuid"]: tenant["name"] for tenant in tenants}
+    controller_info: Dict[str, Dict[str, object]] = {"tags": {}, "fields": {}}
+    if collector.collect_inventory:
+        try:
+            controller_info = collector.fetch_cluster()
+            print(
+                "INFO: controller cluster "
+                f"name={controller_info.get('tags', {}).get('name')}, "
+                f"state={controller_info.get('tags', {}).get('cluster_state')}",
+                file=sys.stderr,
+            )
+        except Exception as exc:  # noqa: BLE001
+            print(f"WARNING: controller cluster info unavailable: {exc}", file=sys.stderr)
     lines: List[str] = []
     successful_requests = 0
     deadline_hit = False
 
     for tenant in tenants:
+        inventory_by_endpoint: Dict[str, Dict[str, Dict[str, Dict[str, object]]]] = {}
+        if collector.collect_inventory:
+            for endpoint in INVENTORY_ENDPOINTS:
+                try:
+                    inventory = collector.fetch_inventory(endpoint, tenant)
+                except TimeoutError as exc:
+                    print(
+                        f"ERROR: timeout collecting {endpoint} inventory for tenant "
+                        f"{tenant['uuid']}: {exc}",
+                        file=sys.stderr,
+                    )
+                    deadline_hit = True
+                    break
+                except Exception as exc:  # noqa: BLE001
+                    print(
+                        f"ERROR: failed collecting {endpoint} inventory for tenant "
+                        f"{tenant['uuid']} ({tenant['name']}): {exc}",
+                        file=sys.stderr,
+                    )
+                    continue
+                inventory_by_endpoint[endpoint] = inventory
+                print(
+                    f"INFO: tenant={tenant['name']} ({tenant['uuid']}), "
+                    f"inventory={endpoint}, entities={len(inventory)}",
+                    file=sys.stderr,
+                )
+                lines.extend(
+                    build_inventory_lines(
+                        tenant_lookup, endpoint, tenant, inventory
+                    )
+                )
+            if deadline_hit:
+                print(
+                    "WARNING: overall collection deadline reached; "
+                    "emitting partial results",
+                    file=sys.stderr,
+                )
+                break
+
         for endpoint in MEASUREMENTS:
             try:
                 payload, successful_scope = collector.fetch_endpoint(endpoint, tenant)
@@ -569,7 +1055,23 @@ def main() -> int:
                     file=sys.stderr,
                 )
                 lines.extend(
-                    build_line_protocol(tenant_lookup, endpoint, tenant, payload)
+                    build_line_protocol(
+                        tenant_lookup,
+                        endpoint,
+                        tenant,
+                        payload,
+                        inventory_by_endpoint.get(endpoint),
+                        default_tags=(
+                            controller_info.get("tags")
+                            if endpoint == "controller"
+                            else None
+                        ),
+                        default_fields=(
+                            controller_info.get("fields")
+                            if endpoint == "controller"
+                            else None
+                        ),
+                    )
                 )
                 successful_requests += 1
             except TimeoutError as exc:
