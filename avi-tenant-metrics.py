@@ -19,6 +19,9 @@ MEASUREMENTS = {
     "pool": "/devices/avi/pool",
     "serviceengine": "/devices/avi/serviceengine",
     "controller": "/devices/avi/controller",
+    # Per-node cluster inventory (name + IP + role/state); global, not
+    # tenant-scoped, and has no analytics endpoint of its own.
+    "controller_node": "/devices/avi/controller_node",
 }
 
 # Inventory endpoints provide the human-readable name, operational state, and
@@ -239,24 +242,58 @@ def first_vip_address(config: Dict[str, object]) -> str:
     return ""
 
 
-def vs_pool_link(item: Dict[str, object], config: Dict[str, object]) -> Tuple[str, str]:
-    """Resolve a VS's primary pool (uuid, name).
+def _entry_ref(entry: object) -> Tuple[str, str]:
+    """Resolve (uuid, name) from an inventory ref entry (ref string or uuid/name)."""
+    if not isinstance(entry, dict):
+        return "", ""
+    uuid, name = parse_ref(entry.get("ref"))
+    if not uuid:
+        uuid = str(entry.get("uuid") or "")
+        name = str(entry.get("name") or "")
+    return uuid, name
 
-    Falls back from config.pool_ref to the pools[] / poolgroups[] arrays so
-    SNI-child and pool-group virtual services still link to a backend.
+
+def vs_pool_links(item: Dict[str, object], config: Dict[str, object]) -> Dict[str, object]:
+    """Resolve a VS's backend linkage, covering single pools and pool groups.
+
+    A VS may point at one pool (config.pool_ref), a pool group that fans out to
+    an array of pools (config.pool_group_ref), or expose the expanded set under
+    item.pools[] / item.poolgroups[]. Returns the primary pool plus the pool
+    group and a pool count, so multi-pool ("array of pools") services still
+    resolve a name instead of coming back blank.
     """
     pool_uuid, pool_name = parse_ref(config.get("pool_ref"))
-    if pool_uuid:
-        return pool_uuid, pool_name
-    for key in ("pools", "poolgroups"):
-        entries = item.get(key)
+
+    pool_refs: List[Tuple[str, str]] = []
+    entries = item.get("pools")
+    if isinstance(entries, list):
+        for entry in entries:
+            uuid, name = _entry_ref(entry)
+            if uuid:
+                pool_refs.append((uuid, name))
+
+    # Primary single pool: an explicit pool_ref wins, else the first expanded pool.
+    if not pool_uuid and pool_refs:
+        pool_uuid, pool_name = pool_refs[0]
+
+    pg_uuid, pg_name = parse_ref(config.get("pool_group_ref"))
+    if not pg_uuid:
+        entries = item.get("poolgroups")
         if isinstance(entries, list):
             for entry in entries:
-                ref = entry.get("ref") if isinstance(entry, dict) else None
-                pool_uuid, pool_name = parse_ref(ref)
-                if pool_uuid:
-                    return pool_uuid, pool_name
-    return "", ""
+                uuid, name = _entry_ref(entry)
+                if uuid:
+                    pg_uuid, pg_name = uuid, name
+                    break
+
+    num_pools = len(pool_refs) or (1 if pool_uuid else 0)
+    return {
+        "pool_uuid": pool_uuid,
+        "pool_name": pool_name,
+        "pool_group_uuid": pg_uuid,
+        "pool_group_name": pg_name,
+        "num_pools": num_pools,
+    }
 
 
 
@@ -316,6 +353,9 @@ class AviCollector:
         self._inventory_path_cache: Dict[str, str] = {}
         # Cache global controller (cluster) name/state; fetched once per run.
         self._cluster_info: Dict[str, Dict[str, object]] | None = None
+        # Per-node cluster records (name/IP/role/state), built alongside
+        # _cluster_info and emitted once per run under controller_node.
+        self._cluster_nodes: List[Dict[str, Dict[str, object]]] = []
 
         self.session = requests.Session()
 
@@ -674,16 +714,21 @@ class AviCollector:
 
         info: Dict[str, Dict[str, object]] = {"tags": {}, "fields": {}}
         headers = {"X-Avi-Version": self.api_version}
+        cluster_name = ""
+        raw_nodes: List[Dict[str, object]] = []
         try:
             cluster = self._request(
                 "GET", "/api/cluster", headers=headers
             ).json()
             name = cluster.get("name")
             if name:
-                info["tags"]["name"] = str(name)
+                cluster_name = str(name)
+                info["tags"]["name"] = cluster_name
             nodes = cluster.get("nodes")
-            if isinstance(nodes, list) and nodes:
-                first = nodes[0] if isinstance(nodes[0], dict) else {}
+            if isinstance(nodes, list):
+                raw_nodes = [n for n in nodes if isinstance(n, dict)]
+            if raw_nodes:
+                first = raw_nodes[0]
                 node_name = first.get("name") or (
                     first.get("ip", {}).get("addr")
                     if isinstance(first.get("ip"), dict)
@@ -691,10 +736,11 @@ class AviCollector:
                 )
                 if node_name:
                     info["tags"]["controller_node"] = str(node_name)
-                info["fields"]["node_count"] = len(nodes)
+                info["fields"]["node_count"] = len(raw_nodes)
         except Exception as exc:  # noqa: BLE001
             print(f"WARNING: /api/cluster fetch failed: {exc}", file=sys.stderr)
 
+        node_runtime: Dict[str, Dict[str, object]] = {}
         try:
             runtime = self._request(
                 "GET", "/api/cluster/runtime", headers=headers
@@ -703,6 +749,11 @@ class AviCollector:
             if state:
                 info["tags"]["cluster_state"] = str(state)
                 info["fields"]["up"] = 1 if str(state).startswith("CLUSTER_UP") else 0
+            node_states = runtime.get("node_states")
+            if isinstance(node_states, list):
+                for ns in node_states:
+                    if isinstance(ns, dict) and ns.get("name"):
+                        node_runtime[str(ns["name"])] = ns
             if "node_count" not in info["fields"]:
                 count = runtime.get("nodes_count")
                 if isinstance(count, (int, float)):
@@ -710,6 +761,9 @@ class AviCollector:
         except Exception as exc:  # noqa: BLE001
             print(f"WARNING: /api/cluster/runtime fetch failed: {exc}", file=sys.stderr)
 
+        self._cluster_nodes = _build_cluster_node_records(
+            cluster_name, raw_nodes, node_runtime
+        )
         self._cluster_info = info
         return info
 
@@ -757,11 +811,17 @@ def _parse_inventory(
             tags["app_profile_type"] = str(app_profile_type)
 
         if endpoint == "virtualservice":
-            pool_uuid, pool_name = vs_pool_link(item, config)
-            if pool_uuid:
-                tags["pool_uuid"] = pool_uuid
-            if pool_name:
-                tags["pool_name"] = pool_name
+            links = vs_pool_links(item, config)
+            if links["pool_uuid"]:
+                tags["pool_uuid"] = links["pool_uuid"]
+            if links["pool_name"]:
+                tags["pool_name"] = links["pool_name"]
+            if links["pool_group_uuid"]:
+                tags["pool_group_uuid"] = links["pool_group_uuid"]
+            if links["pool_group_name"]:
+                tags["pool_group_name"] = links["pool_group_name"]
+            if links["num_pools"]:
+                fields["num_pools"] = int(links["num_pools"])
             fqdn = config.get("fqdn")
             if fqdn:
                 tags["fqdn"] = str(fqdn)
@@ -821,6 +881,54 @@ def _parse_inventory(
 
         lookup[entity_uuid] = {"tags": tags, "fields": fields}
     return lookup
+
+
+def _build_cluster_node_records(
+    cluster_name: str,
+    raw_nodes: List[Dict[str, object]],
+    node_runtime: Dict[str, Dict[str, object]],
+) -> List[Dict[str, Dict[str, object]]]:
+    """Tie each cluster member to its IP, role, and state.
+
+    Merges /api/cluster nodes[] (name + ip) with /api/cluster/runtime
+    node_states[] (state + role), keyed by node name. Falls back to the
+    runtime node list when /api/cluster omits nodes.
+    """
+    raw_by_name = {
+        str(n.get("name")): n for n in raw_nodes if n.get("name")
+    }
+    node_names = list(raw_by_name.keys()) or list(node_runtime.keys())
+
+    records: List[Dict[str, Dict[str, object]]] = []
+    for node_name in node_names:
+        node = raw_by_name.get(node_name, {})
+        rt = node_runtime.get(node_name, {})
+        ip = node.get("ip")
+        node_ip = ip.get("addr") if isinstance(ip, dict) else None
+        if not node_ip:
+            node_ip = node.get("public_ip_or_name") or rt.get("mgmt_ip")
+        role = node.get("role") or rt.get("role")
+        node_state = rt.get("state")
+
+        tags: Dict[str, object] = {"node_name": node_name}
+        if cluster_name:
+            tags["cluster_name"] = cluster_name
+        if node_ip:
+            tags["node_ip"] = str(node_ip)
+        if role:
+            tags["role"] = str(role)
+        if node_state:
+            tags["node_state"] = str(node_state)
+
+        # member=1 guarantees a field even when runtime state is unavailable;
+        # up is only emitted when a per-node state is known.
+        fields: Dict[str, object] = {"member": 1}
+        if node_state:
+            text = str(node_state).upper()
+            fields["up"] = 1 if ("ACTIVE" in text or text.startswith("CLUSTER_UP")) else 0
+
+        records.append({"tags": tags, "fields": fields})
+    return records
 
 
 def build_line_protocol(
@@ -968,6 +1076,39 @@ def build_inventory_lines(
     return lines
 
 
+def build_controller_node_lines(
+    nodes: List[Dict[str, Dict[str, object]]],
+) -> List[str]:
+    """Emit one record per controller cluster node (name + IP + role/state)."""
+    measurement = MEASUREMENTS["controller_node"]
+    timestamp_ns = time.time_ns()
+
+    lines: List[str] = []
+    for node in nodes:
+        fields = node.get("fields", {})
+        if not fields:
+            continue
+        tag_items = sorted(
+            (k, str(v))
+            for k, v in node.get("tags", {}).items()
+            if v is not None and str(v) != ""
+        )
+        tag_text = ",".join(
+            f"{escape_tag_or_key(k)}={escape_tag_or_key(v)}" for k, v in tag_items
+        )
+        field_text = ",".join(
+            f"{escape_tag_or_key(k)}={encode_field_value(v)}"
+            for k, v in sorted(fields.items())
+        )
+        line = escape_measurement(measurement)
+        if tag_text:
+            line += f",{tag_text}"
+        line += f" {field_text} {timestamp_ns}"
+        lines.append(line)
+
+    return lines
+
+
 def main() -> int:
     if bool_env("AVI_COLLECTOR_VALIDATE_ONLY", False):
         return 0
@@ -998,6 +1139,12 @@ def main() -> int:
         except Exception as exc:  # noqa: BLE001
             print(f"WARNING: controller cluster info unavailable: {exc}", file=sys.stderr)
     lines: List[str] = []
+    if collector.collect_inventory and collector._cluster_nodes:
+        lines.extend(build_controller_node_lines(collector._cluster_nodes))
+        print(
+            f"INFO: controller cluster nodes={len(collector._cluster_nodes)}",
+            file=sys.stderr,
+        )
     successful_requests = 0
     deadline_hit = False
 
@@ -1041,7 +1188,7 @@ def main() -> int:
                 )
                 break
 
-        for endpoint in MEASUREMENTS:
+        for endpoint in METRIC_IDS:
             try:
                 payload, successful_scope = collector.fetch_endpoint(endpoint, tenant)
                 series_count, data_series_count, point_count = collector._payload_stats(

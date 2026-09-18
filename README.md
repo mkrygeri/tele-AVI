@@ -300,6 +300,7 @@ See [TROUBLESHOOTING.md](docs/TROUBLESHOOTING.md) for detailed solutions.
 ## 📄 Documentation
 
 - **[Configuration Guide](docs/CONFIGURATION.md)**: Detailed configuration reference
+- **[Measurements & Data Model](docs/MEASUREMENTS.md)**: What each measurement contains, its API source, and how derived fields are calculated
 - **[Deployment Guide](docs/DEPLOYMENT.md)**: Production deployment instructions
 - **[Troubleshooting](docs/TROUBLESHOOTING.md)**: Common issues and solutions
 - **[Project Overview](PROJECT_OVERVIEW.md)**: Complete project documentation

@@ -34,9 +34,9 @@ CLUSTER = {
     "uuid": "cluster-avi-uuid-0001",
     "name": "avi-controller-cluster",
     "nodes": [
-        {"name": "avi-node-1", "role": "leader"},
-        {"name": "avi-node-2", "role": "follower"},
-        {"name": "avi-node-3", "role": "follower"},
+        {"name": "avi-node-1", "role": "leader", "ip": {"type": "V4", "addr": "10.90.10.11"}},
+        {"name": "avi-node-2", "role": "follower", "ip": {"type": "V4", "addr": "10.90.10.12"}},
+        {"name": "avi-node-3", "role": "follower", "ip": {"type": "V4", "addr": "10.90.10.13"}},
     ],
 }
 
@@ -523,7 +523,12 @@ def get_cluster_runtime():
     return jsonify(
         {
             "node_states": [
-                {"name": node["name"], "role": node["role"], "state": "CLUSTER_ACTIVE"}
+                {
+                    "name": node["name"],
+                    "role": node["role"],
+                    "state": "CLUSTER_ACTIVE",
+                    "mgmt_ip": node.get("ip", {}).get("addr"),
+                }
                 for node in CLUSTER["nodes"]
             ],
             "cluster_state": {"state": "CLUSTER_UP_HA_ACTIVE"},
