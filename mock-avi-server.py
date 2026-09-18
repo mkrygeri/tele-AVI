@@ -345,6 +345,21 @@ def get_serviceengine_metrics():
 def get_controller_metrics():
     logger.info("Controller metrics request: %s", dict(request.args))
     metric_ids = parse_metrics_request()
+    entity_uuid = request.args.get("entity_uuid")
+    if entity_uuid:
+        # Per-node controller health: synthesize a series for the requested node
+        # UUID (== node vm_uuid) so individual-node CPU/memory/disk can be
+        # collected and alerted on, mirroring the live controller.
+        tenant_uuid = resolve_tenant_scope_uuid() or TENANTS[0]["uuid"]
+        tenant_name = next(
+            (t["name"] for t in TENANTS if t["uuid"] == tenant_uuid), None
+        )
+        node = {
+            "uuid": entity_uuid,
+            "tenant": tenant_uuid,
+            "tenant_name": tenant_name,
+        }
+        return jsonify(build_results([node], metric_ids))
     return jsonify(build_results(scoped_entities("controller"), metric_ids))
 
 

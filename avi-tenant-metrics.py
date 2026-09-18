@@ -114,6 +114,19 @@ METRIC_IDS = {
     ],
 }
 
+# Per-node controller health metrics. The controller analytics endpoint returns
+# a single node's series when filtered by entity_uuid, and each node's vm_uuid
+# equals its controller entity_uuid, so these resolve individual-node CPU/memory/
+# disk for alerting. Kept separate from METRIC_IDS because there is no
+# /api/analytics/metrics/controller_node endpoint to iterate.
+CONTROLLER_NODE_METRIC_IDS = [
+    "controller_stats.avg_cpu_usage",
+    "controller_stats.avg_mem_usage",
+    "controller_stats.avg_disk_usage",
+    "controller_stats.avg_disk_read_bytes",
+    "controller_stats.avg_disk_write_bytes",
+]
+
 SCOPE_MODES = {"auto", "header_uuid", "header_name", "query_uuid", "query_name"}
 
 
@@ -804,6 +817,57 @@ class AviCollector:
         self._cluster_info = info
         return info
 
+    def fetch_node_metrics(self) -> None:
+        """Attach per-node controller health metrics to each cluster node record.
+
+        The controller analytics endpoint returns a single node's series when
+        filtered by entity_uuid, and each node's vm_uuid equals its controller
+        entity_uuid, so one query per node yields that node's own CPU/memory/disk
+        usage. Field names reuse the controller normalization (avg_cpu_usage, ...)
+        so per-node values line up with the aggregate controller measurement.
+        """
+        if not self._cluster_nodes or not CONTROLLER_NODE_METRIC_IDS:
+            return
+        for node in self._cluster_nodes:
+            node_uuid = node["tags"].get("node_uuid")
+            if not node_uuid:
+                continue
+            try:
+                payload = self._request(
+                    "GET",
+                    "/api/analytics/metrics/controller",
+                    params={
+                        "metric_id": ",".join(CONTROLLER_NODE_METRIC_IDS),
+                        "step": "300",
+                        "limit": "1",
+                        "include_name": "true",
+                        "entity_uuid": str(node_uuid),
+                    },
+                    headers={"X-Avi-Version": self.api_version},
+                ).json()
+            except Exception as exc:  # noqa: BLE001
+                print(
+                    f"WARNING: per-node metrics fetch failed for node "
+                    f"{node['tags'].get('node_name')} ({node_uuid}): {exc}",
+                    file=sys.stderr,
+                )
+                continue
+            for result in payload.get("results", []):
+                for series in result.get("series", []):
+                    header = series.get("header", {})
+                    metric_name = header.get("name")
+                    data = series.get("data") or []
+                    if not metric_name or not data:
+                        continue
+                    value = data[-1].get("value")
+                    if value is None:
+                        continue
+                    field_name = normalize_metric_name("controller", str(metric_name))
+                    try:
+                        node["fields"][field_name] = float(value)
+                    except (TypeError, ValueError):
+                        continue
+
 
 def _parse_inventory(
     endpoint: str, results: List[Dict[str, object]]
@@ -1182,6 +1246,13 @@ def main() -> int:
             print(f"WARNING: controller cluster info unavailable: {exc}", file=sys.stderr)
     lines: List[str] = []
     if collector.collect_inventory and collector._cluster_nodes:
+        try:
+            collector.fetch_node_metrics()
+        except Exception as exc:  # noqa: BLE001
+            print(
+                f"WARNING: per-node controller metrics unavailable: {exc}",
+                file=sys.stderr,
+            )
         lines.extend(build_controller_node_lines(collector._cluster_nodes))
         print(
             f"INFO: controller cluster nodes={len(collector._cluster_nodes)}",

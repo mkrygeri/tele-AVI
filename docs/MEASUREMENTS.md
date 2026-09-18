@@ -18,7 +18,7 @@ update the relevant table here.
 | `/devices/avi/virtualservice` | Each virtual service | Analytics + VS inventory |
 | `/devices/avi/pool` | Each pool | Analytics + pool inventory |
 | `/devices/avi/serviceengine` | Each service engine | Analytics + SE inventory |
-| `/devices/avi/controller_node` | Each cluster member node | `/api/cluster` + `/api/cluster/runtime` |
+| `/devices/avi/controller_node` | Each cluster member node | `/api/cluster` + `/api/cluster/runtime` + per-node analytics |
 
 Measurement names follow an OpenConfig-style path. The slash is legal, unescaped,
 in Influx line protocol.
@@ -202,6 +202,14 @@ such as `avg_cpu_usage`, `avg_mem_usage`, `avg_disk_usage`,
 
 > Many of these read `0` until virtual services / service engines are deployed.
 
+### `/devices/avi/controller_node`
+
+Per-node subset of `controller_stats.*`, fetched from the controller analytics
+endpoint filtered by each node's `entity_uuid` (= `vm_uuid`) so the values are for
+that individual node, not the cluster aggregate: `avg_cpu_usage`, `avg_mem_usage`,
+`avg_disk_usage`, `avg_disk_read_bytes`, `avg_disk_write_bytes`. Field names match
+the `controller` measurement, so per-node vs. aggregate can be compared directly.
+
 ---
 
 ## 5. Per-measurement tag & field reference
@@ -322,7 +330,10 @@ analytics fields in [§4](#4-analytics-metric-fields-per-measurement)).
 One record **per cluster member**, emitted once per run (the cluster is global,
 not tenant-scoped). Sourced by joining `/api/cluster` `nodes[]` (name + IP) with
 `/api/cluster/runtime` `node_states[]` (role + state), keyed by node name. Falls
-back to the runtime node list when `/api/cluster` omits `nodes[]`.
+back to the runtime node list when `/api/cluster` omits `nodes[]`. Per-node
+health metrics are then fetched from `/api/analytics/metrics/controller` filtered
+by each node's `entity_uuid` (= its `vm_uuid`), giving individual-node CPU/memory/
+disk usage for alerting on a single node rather than the cluster aggregate.
 
 **Tags**
 
@@ -341,6 +352,15 @@ back to the runtime node list when `/api/cluster` omits `nodes[]`.
 |-------|------|---------------------|
 | `member` | int | Always `1` — guarantees a field and counts configured members |
 | `up` | int | `1` if `node_state` contains `ACTIVE` or starts with `CLUSTER_UP`, else `0`. Emitted only when a per-node state is known |
+| `avg_cpu_usage` | float | Per-node CPU % — `controller_stats.avg_cpu_usage` filtered by this node's `entity_uuid` |
+| `avg_mem_usage` | float | Per-node memory % — `controller_stats.avg_mem_usage` |
+| `avg_disk_usage` | float | Per-node disk % — `controller_stats.avg_disk_usage` |
+| `avg_disk_read_bytes` | float | Per-node disk read bytes/s — `controller_stats.avg_disk_read_bytes` |
+| `avg_disk_write_bytes` | float | Per-node disk write bytes/s — `controller_stats.avg_disk_write_bytes` |
+
+> Per-node metric fields are only present when the analytics endpoint returns data
+> for that node; identity + `member`/`up` are always emitted so a node still shows
+> up even if its metrics are briefly unavailable.
 
 ---
 
@@ -396,7 +416,7 @@ omitted for brevity.
 **Controller node — per-node record**
 
 ```
-/devices/avi/controller_node,cluster_name=cluster-0-1,node_name=198.47.119.104,node_uuid=564d9383…,node_ip=198.47.119.104,role=CLUSTER_LEADER,node_state=CLUSTER_ACTIVE member=1i,up=1i
+/devices/avi/controller_node,cluster_name=cluster-0-1,node_name=198.47.119.104,node_uuid=564d9383…,node_ip=198.47.119.104,role=CLUSTER_LEADER,node_state=CLUSTER_ACTIVE avg_cpu_usage=5.2,avg_mem_usage=82.0,avg_disk_usage=20.0,avg_disk_read_bytes=0.0,avg_disk_write_bytes=98539.07,member=1i,up=1i
 ```
 
 ---
