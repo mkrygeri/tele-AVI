@@ -301,8 +301,13 @@ analytics fields in [§4](#4-analytics-metric-fields-per-measurement)).
 | Tag | Source | Notes |
 |-----|--------|-------|
 | `name` | `/api/cluster` `name` | Cluster name (e.g. `cluster-0-1`) |
+| `cluster_uuid` | `/api/cluster` `uuid` | Cluster identifier |
 | `cluster_state` | `/api/cluster/runtime` `cluster_state.state` | e.g. `CLUSTER_UP_NO_HA` |
-| `controller_node` | first `cluster.nodes[].name`/`ip.addr` | Leader node identity |
+| `controller_node` | first `cluster.nodes[].name`/`ip.addr` | First node name (legacy) |
+| `node_name` | leader `cluster.nodes[].name` | Joins to `controller_node.node_name` |
+| `node_uuid` | leader `cluster.nodes[].vm_uuid` | Node UUID; equals this record's `entity_uuid` and `controller_node.node_uuid` |
+| `node_names` | all `cluster.nodes[].name` | Comma-joined; emitted only when the cluster has >1 node |
+| `node_uuids` | all `cluster.nodes[].vm_uuid` | Comma-joined; emitted only when the cluster has >1 node |
 
 **Fields**
 
@@ -324,6 +329,7 @@ back to the runtime node list when `/api/cluster` omits `nodes[]`.
 | Tag | Source | Notes |
 |-----|--------|-------|
 | `node_name` | `nodes[].name` (or runtime `node_states[].name`) | Node identity |
+| `node_uuid` | `nodes[].vm_uuid` | Node UUID; equals the controller `entity_uuid` / `node_uuid` |
 | `node_ip` | `nodes[].ip.addr`, else `public_ip_or_name` / runtime `mgmt_ip` | Node management IP |
 | `cluster_name` | `/api/cluster` `name` | Correlates with the controller `name` tag |
 | `role` | `nodes[].role` or runtime `node_states[].role` | e.g. `CLUSTER_LEADER` / follower |
@@ -384,13 +390,13 @@ omitted for brevity.
 **Controller — enriched metric record**
 
 ```
-/devices/avi/controller,name=cluster-0-1,cluster_state=CLUSTER_UP_NO_HA,controller_node=198.47.119.104,tenant_name=admin,entity_uuid=564d9383… up=1i,node_count=1i,avg_cpu_usage=5.75,avg_mem_usage=84.0,avg_num_active_vs=4.0
+/devices/avi/controller,name=cluster-0-1,cluster_uuid=cluster-0407ee32…,cluster_state=CLUSTER_UP_NO_HA,controller_node=198.47.119.104,node_name=198.47.119.104,node_uuid=564d9383…,tenant_name=admin,entity_uuid=564d9383… up=1i,node_count=1i,avg_cpu_usage=5.75,avg_mem_usage=84.0,avg_num_active_vs=4.0
 ```
 
 **Controller node — per-node record**
 
 ```
-/devices/avi/controller_node,cluster_name=cluster-0-1,node_name=198.47.119.104,node_ip=198.47.119.104,role=CLUSTER_LEADER,node_state=CLUSTER_ACTIVE member=1i,up=1i
+/devices/avi/controller_node,cluster_name=cluster-0-1,node_name=198.47.119.104,node_uuid=564d9383…,node_ip=198.47.119.104,role=CLUSTER_LEADER,node_state=CLUSTER_ACTIVE member=1i,up=1i
 ```
 
 ---

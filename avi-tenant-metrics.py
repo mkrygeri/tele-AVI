@@ -706,7 +706,9 @@ class AviCollector:
 
         The controller has no per-tenant inventory endpoint; its friendly name and
         operational state come from /api/cluster and /api/cluster/runtime. Result is
-        {"tags": {name, cluster_state, controller_node}, "fields": {up, node_count}}.
+        {"tags": {name, cluster_uuid, cluster_state, controller_node, node_name,
+        node_uuid[, node_names, node_uuids]}, "fields": {up, node_count}}. node_name
+        / node_uuid identify the leader and join to the controller_node measurement.
         Cached because the cluster is global (not per-tenant).
         """
         if self._cluster_info is not None:
@@ -724,6 +726,9 @@ class AviCollector:
             if name:
                 cluster_name = str(name)
                 info["tags"]["name"] = cluster_name
+            cluster_uuid = cluster.get("uuid")
+            if cluster_uuid:
+                info["tags"]["cluster_uuid"] = str(cluster_uuid)
             nodes = cluster.get("nodes")
             if isinstance(nodes, list):
                 raw_nodes = [n for n in nodes if isinstance(n, dict)]
@@ -764,6 +769,38 @@ class AviCollector:
         self._cluster_nodes = _build_cluster_node_records(
             cluster_name, raw_nodes, node_runtime
         )
+        # Surface node identity on the controller record so it joins to the
+        # per-node controller_node measurement (leader preferred).
+        if self._cluster_nodes:
+            leader = next(
+                (
+                    n
+                    for n in self._cluster_nodes
+                    if str(n["tags"].get("role", "")).upper().endswith("LEADER")
+                ),
+                self._cluster_nodes[0],
+            )
+            leader_name = leader["tags"].get("node_name")
+            leader_uuid = leader["tags"].get("node_uuid")
+            if leader_name:
+                info["tags"]["node_name"] = leader_name
+            if leader_uuid:
+                info["tags"]["node_uuid"] = leader_uuid
+            if len(self._cluster_nodes) > 1:
+                names = [
+                    str(n["tags"]["node_name"])
+                    for n in self._cluster_nodes
+                    if n["tags"].get("node_name")
+                ]
+                uuids = [
+                    str(n["tags"]["node_uuid"])
+                    for n in self._cluster_nodes
+                    if n["tags"].get("node_uuid")
+                ]
+                if names:
+                    info["tags"]["node_names"] = ",".join(names)
+                if uuids:
+                    info["tags"]["node_uuids"] = ",".join(uuids)
         self._cluster_info = info
         return info
 
@@ -909,10 +946,15 @@ def _build_cluster_node_records(
             node_ip = node.get("public_ip_or_name") or rt.get("mgmt_ip")
         role = node.get("role") or rt.get("role")
         node_state = rt.get("state")
+        # vm_uuid is the node's stable UUID (equals the controller analytics
+        # entity_uuid), so it joins controller_node back to /devices/avi/controller.
+        node_uuid = node.get("vm_uuid") or node.get("uuid") or rt.get("uuid")
 
         tags: Dict[str, object] = {"node_name": node_name}
         if cluster_name:
             tags["cluster_name"] = cluster_name
+        if node_uuid:
+            tags["node_uuid"] = str(node_uuid)
         if node_ip:
             tags["node_ip"] = str(node_ip)
         if role:
