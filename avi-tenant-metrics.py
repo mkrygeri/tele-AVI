@@ -8,7 +8,7 @@ import sys
 import time
 from collections import defaultdict
 from datetime import datetime, timezone
-from typing import Dict, Iterable, List, Tuple
+from typing import Dict, Iterable, List, Tuple, cast
 from urllib.parse import parse_qsl, urlsplit
 
 import requests
@@ -22,6 +22,10 @@ MEASUREMENTS = {
     # Per-node cluster inventory (name + IP + role/state); global, not
     # tenant-scoped, and has no analytics endpoint of its own.
     "controller_node": "/devices/avi/controller_node",
+    # VS<->Pool association edges: one record per (VS, pool) pair so multi-pool
+    # VSes and shared pools are joinable from either side (metrics can't hold a
+    # many-to-many relationship in single-valued tags on the entity records).
+    "vs_pool_link": "/devices/avi/vs_pool_link",
 }
 
 # Inventory endpoints provide the human-readable name, operational state, and
@@ -318,6 +322,8 @@ def vs_pool_links(item: Dict[str, object], config: Dict[str, object]) -> Dict[st
         "pool_group_uuid": pg_uuid,
         "pool_group_name": pg_name,
         "num_pools": num_pools,
+        # Full expanded member set (uuid, name) for emitting per-pool edges.
+        "pools": pool_refs,
     }
 
 
@@ -896,6 +902,7 @@ def _parse_inventory(
 
         tags: Dict[str, object] = {}
         fields: Dict[str, object] = {}
+        vs_pool_edges: List[Dict[str, object]] = []
 
         name = config.get("name")
         if name:
@@ -936,6 +943,26 @@ def _parse_inventory(
             # Always emit (including 0) so pool-group / VH-parent VSes that
             # resolve to zero direct pools still appear in num_pools views.
             fields["num_pools"] = int(links["num_pools"])
+            # One edge per (VS, pool) so multi-pool VSes and shared pools stay
+            # joinable from either side via the vs_pool_link measurement.
+            member_pools = links.get("pools")
+            if not isinstance(member_pools, list) or not member_pools:
+                member_pools = (
+                    [(links["pool_uuid"], links["pool_name"])]
+                    if links["pool_uuid"]
+                    else []
+                )
+            for edge_pool_uuid, edge_pool_name in member_pools:
+                if not edge_pool_uuid:
+                    continue
+                vs_pool_edges.append(
+                    {
+                        "pool_uuid": edge_pool_uuid,
+                        "pool_name": edge_pool_name,
+                        "pool_group_uuid": links["pool_group_uuid"],
+                        "pool_group_name": links["pool_group_name"],
+                    }
+                )
             fqdn = config.get("fqdn")
             if fqdn:
                 tags["fqdn"] = str(fqdn)
@@ -993,7 +1020,10 @@ def _parse_inventory(
             if isinstance(vs_refs, list):
                 fields["num_virtualservices"] = len(vs_refs)
 
-        lookup[entity_uuid] = {"tags": tags, "fields": fields}
+        entry: Dict[str, object] = {"tags": tags, "fields": fields}
+        if vs_pool_edges:
+            entry["links"] = vs_pool_edges
+        lookup[entity_uuid] = cast("Dict[str, Dict[str, object]]", entry)
     return lookup
 
 
@@ -1195,6 +1225,57 @@ def build_inventory_lines(
     return lines
 
 
+def build_vs_pool_link_lines(
+    tenant_lookup: Dict[str, str],
+    tenant: Dict[str, str],
+    enrichment: Dict[str, Dict[str, Dict[str, object]]],
+) -> List[str]:
+    """Emit one edge record per (virtual service, pool) association.
+
+    Multi-pool (pool-group) VSes emit one line per member pool and shared pools
+    emit one line per referencing VS, so the mapping is joinable from either
+    direction: filter by virtualservice_uuid for a VS's pools, or by pool_uuid
+    for a pool's VSes.
+    """
+    measurement = MEASUREMENTS["vs_pool_link"]
+    tenant_uuid = tenant["uuid"]
+    tenant_name = tenant_lookup.get(tenant_uuid, tenant.get("name"))
+    timestamp_ns = time.time_ns()
+
+    lines: List[str] = []
+    for vs_uuid, entry in enrichment.items():
+        edges = entry.get("links")
+        if not isinstance(edges, list):
+            continue
+        vs_name = entry.get("tags", {}).get("name")
+        for edge in edges:
+            if not isinstance(edge, dict) or not edge.get("pool_uuid"):
+                continue
+            tags = {
+                "virtualservice_uuid": vs_uuid,
+                "virtualservice_name": vs_name,
+                "pool_uuid": edge.get("pool_uuid"),
+                "pool_name": edge.get("pool_name"),
+                "pool_group_uuid": edge.get("pool_group_uuid"),
+                "pool_group_name": edge.get("pool_group_name"),
+                "tenant_uuid": tenant_uuid,
+                "tenant_name": tenant_name,
+            }
+            tag_items = sorted(
+                (k, str(v)) for k, v in tags.items() if v is not None and str(v) != ""
+            )
+            tag_text = ",".join(
+                f"{escape_tag_or_key(k)}={escape_tag_or_key(v)}" for k, v in tag_items
+            )
+            line = escape_measurement(measurement)
+            if tag_text:
+                line += f",{tag_text}"
+            line += f" linked=1i {timestamp_ns}"
+            lines.append(line)
+
+    return lines
+
+
 def build_controller_node_lines(
     nodes: List[Dict[str, Dict[str, object]]],
 ) -> List[str]:
@@ -1306,6 +1387,10 @@ def main() -> int:
                         tenant_lookup, endpoint, tenant, inventory
                     )
                 )
+                if endpoint == "virtualservice":
+                    lines.extend(
+                        build_vs_pool_link_lines(tenant_lookup, tenant, inventory)
+                    )
             if deadline_hit:
                 print(
                     "WARNING: overall collection deadline reached; "

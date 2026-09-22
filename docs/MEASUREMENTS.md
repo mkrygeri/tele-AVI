@@ -19,6 +19,7 @@ update the relevant table here.
 | `/devices/avi/pool` | Each pool | Analytics + pool inventory |
 | `/devices/avi/serviceengine` | Each service engine | Analytics + SE inventory |
 | `/devices/avi/controller_node` | Each cluster member node | `/api/cluster` + `/api/cluster/runtime` + per-node analytics |
+| `/devices/avi/vs_pool_link` | Each (virtual service, pool) association | VS inventory `pools[]` / `poolgroups[]` |
 
 Measurement names follow an OpenConfig-style path. The slash is legal, unescaped,
 in Influx line protocol.
@@ -264,8 +265,8 @@ analytics fields in [§4](#4-analytics-metric-fields-per-measurement)).
 |-----|--------|-------|
 | `name` | `config.name` | Friendly pool name |
 | `oper_status` | `runtime.oper_status.state` | Full enum string |
-| `virtualservice_uuid` | first `virtualservices[].ref` | **Pool → VS link** |
-| `virtualservice_name` | same ref `#name` | **Pool → VS link** |
+| `virtualservice_uuid` | first `virtualservices[].ref` | **Pool → VS link** (first VS only; use `/devices/avi/vs_pool_link` for the complete many-to-many mapping) |
+| `virtualservice_name` | same ref `#name` | **Pool → VS link** (first VS only) |
 | `cloud_name` | `config.cloud_ref` `#name` | Cloud |
 | `app_profile_type` | `item.app_profile_type` | Application profile |
 | `alert_level` | `item.alert.level` | Present when alerting |
@@ -283,6 +284,40 @@ analytics fields in [§4](#4-analytics-metric-fields-per-measurement)).
 | `num_servers_enabled` | float | `runtime.num_servers_enabled` |
 | `percent_servers_up_total` | float | `runtime.percent_servers_up_total` |
 | `percent_servers_up_enabled` | float | `runtime.percent_servers_up_enabled` |
+
+### `/devices/avi/vs_pool_link`
+
+An **association (edge) record** — one line per `(virtual service, pool)` pair.
+Because a metrics model can't hold a many-to-many relationship in single-valued
+tags, this measurement makes the mapping joinable from either direction:
+
+- **VS → pools:** filter on `virtualservice_uuid` to list every pool a VS uses
+  (a pool-group VS emits one edge per member pool).
+- **Pool → VSes:** filter on `pool_uuid` to list every VS that references a pool
+  (a shared pool emits one edge per referencing VS).
+
+Sourced from the VS inventory's expanded `pools[]` / `poolgroups[]` arrays, so it
+covers direct single pools, pool-group members, and shared pools. `VH_PARENT`
+VSes (no backend pools) emit no edges.
+
+**Tags**
+
+| Tag | Source | Notes |
+|-----|--------|-------|
+| `virtualservice_uuid` | VS `config.uuid` | The VS side of the edge |
+| `virtualservice_name` | VS `config.name` | The VS side of the edge |
+| `pool_uuid` | member `pools[].ref` | The pool side of the edge |
+| `pool_name` | member `pools[].ref` `#name` | The pool side of the edge |
+| `pool_group_uuid` | `poolgroups[].ref` | Present when the pool is reached via a pool group |
+| `pool_group_name` | `poolgroups[].ref` `#name` | Present when via a pool group |
+| `tenant_uuid` | tenant | Scoping tenant |
+| `tenant_name` | tenant | Scoping tenant |
+
+**Fields**
+
+| Field | Type | Source / derivation |
+|-------|------|---------------------|
+| `linked` | int | Constant `1` — presence of the row *is* the association |
 
 ### `/devices/avi/serviceengine`
 
@@ -412,6 +447,13 @@ omitted for brevity.
 
 ```
 /devices/avi/pool,name=web-pool,oper_status=OPER_UP,virtualservice_name=web-vs,cloud_name=Default-Cloud,tenant_name=admin,entity_uuid=pool-051a… up=1i,oper_status_code=0i,health_score=100.0,num_virtualservices=1i,num_servers=2.0,num_servers_up=2.0
+```
+
+**VS ↔ Pool — association (edge) records**
+
+```
+/devices/avi/vs_pool_link,virtualservice_name=web-vs,virtualservice_uuid=virtualservice-2d2c…,pool_name=web-pool,pool_uuid=pool-09f5…,tenant_name=admin,tenant_uuid=admin linked=1i
+/devices/avi/vs_pool_link,virtualservice_name=api-vs,virtualservice_uuid=virtualservice-b0a3…,pool_name=p2,pool_uuid=pool-2…,pool_group_name=blue-pg,pool_group_uuid=pg-blue,tenant_name=tenant-blue,tenant_uuid=tenant-9911… linked=1i
 ```
 
 **Controller — enriched metric record**
