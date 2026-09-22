@@ -61,6 +61,11 @@ OPER_STATUS_CODE = {name: index for index, name in enumerate(OPER_STATE_ENUM)}
 
 METRIC_IDS = {
     "virtualservice": [
+        # Client-side (client->VS) connection counts. These carry the real VS
+        # traffic; the l4_server.* equivalents below are backend (VS->pool) and
+        # commonly read 0 for L7 VSes that reuse backend connections.
+        "l4_client.avg_complete_conns",
+        "l4_client.avg_new_established_conns",
         "l4_server.avg_complete_conns",
         "l4_server.avg_new_established_conns",
         "l4_server.avg_pool_complete_conns",
@@ -256,7 +261,14 @@ def first_vip_address(config: Dict[str, object]) -> str:
 
 
 def _entry_ref(entry: object) -> Tuple[str, str]:
-    """Resolve (uuid, name) from an inventory ref entry (ref string or uuid/name)."""
+    """Resolve (uuid, name) from an inventory ref entry.
+
+    Inventory arrays (item.pools / item.poolgroups) come back either as bare ref
+    strings ("/api/pool/pool-<uuid>#name") or as objects ({"ref": ...} or
+    {"uuid","name"}) depending on AVI version, so handle both.
+    """
+    if isinstance(entry, str):
+        return parse_ref(entry)
     if not isinstance(entry, dict):
         return "", ""
     uuid, name = parse_ref(entry.get("ref"))
@@ -269,11 +281,11 @@ def _entry_ref(entry: object) -> Tuple[str, str]:
 def vs_pool_links(item: Dict[str, object], config: Dict[str, object]) -> Dict[str, object]:
     """Resolve a VS's backend linkage, covering single pools and pool groups.
 
-    A VS may point at one pool (config.pool_ref), a pool group that fans out to
-    an array of pools (config.pool_group_ref), or expose the expanded set under
-    item.pools[] / item.poolgroups[]. Returns the primary pool plus the pool
-    group and a pool count, so multi-pool ("array of pools") services still
-    resolve a name instead of coming back blank.
+    A VS points at one pool (config.pool_ref) or a pool group that fans out to an
+    array of pools. The inventory exposes the expanded set under item.pools[] and
+    item.poolgroups[] (VS inventory config has no pool_group_ref). Those arrays come
+    back as bare ref strings, which _entry_ref now handles, so pool-group VSes count
+    all their member pools and resolve a name instead of coming back blank.
     """
     pool_uuid, pool_name = parse_ref(config.get("pool_ref"))
 
@@ -921,8 +933,9 @@ def _parse_inventory(
                 tags["pool_group_uuid"] = links["pool_group_uuid"]
             if links["pool_group_name"]:
                 tags["pool_group_name"] = links["pool_group_name"]
-            if links["num_pools"]:
-                fields["num_pools"] = int(links["num_pools"])
+            # Always emit (including 0) so pool-group / VH-parent VSes that
+            # resolve to zero direct pools still appear in num_pools views.
+            fields["num_pools"] = int(links["num_pools"])
             fqdn = config.get("fqdn")
             if fqdn:
                 tags["fqdn"] = str(fqdn)

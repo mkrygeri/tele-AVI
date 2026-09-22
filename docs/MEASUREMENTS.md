@@ -159,12 +159,19 @@ after [normalization](#3c-metric-name-normalization).
 
 | Metric id | Field name |
 |-----------|-----------|
+| `l4_client.avg_complete_conns` | `l4_client_avg_complete_conns` |
+| `l4_client.avg_new_established_conns` | `l4_client_avg_new_established_conns` |
 | `l4_server.avg_complete_conns` | `l4_server_avg_complete_conns` |
 | `l4_server.avg_new_established_conns` | `l4_server_avg_new_established_conns` |
 | `l4_server.avg_pool_complete_conns` | `l4_server_avg_pool_complete_conns` |
 | `l4_server.avg_pool_new_established_conns` | `l4_server_avg_pool_new_established_conns` |
 | `l7_server.avg_complete_responses` | `l7_server_avg_complete_responses` |
 | `l7_server.avg_client_complete_requests` | `l7_server_avg_client_complete_requests` |
+
+> **Client vs. server side:** `l4_client.*` counts client→VS connections (the
+> real VS traffic); `l4_server.*` counts VS→pool (backend) connections and often
+> reads `0` for L7 VSes that reuse backend connections. The `avg_pool_*` variants
+> are backend/pool-oriented and are most meaningful on the pool measurement.
 
 ### `/devices/avi/pool`
 
@@ -228,7 +235,7 @@ analytics fields in [§4](#4-analytics-metric-fields-per-measurement)).
 | `oper_status` | `runtime.oper_status.state` | Full enum string (e.g. `OPER_UP`) |
 | `pool_uuid` | `config.pool_ref`, else first `pools[]` entry | VS to primary pool link |
 | `pool_name` | same ref `#name` | Primary pool name; blank only when the VS has no pool (e.g. `VH_PARENT`) |
-| `pool_group_uuid` | `config.pool_group_ref`, else `poolgroups[]` | Set when the VS fans out to an array of pools |
+| `pool_group_uuid` | first `poolgroups[]` entry | Set when the VS fans out to an array of pools (VS inventory has no `pool_group_ref` in `config`) |
 | `pool_group_name` | same ref `#name` | Pool group name (content-switching / SNI) |
 | `fqdn` | `config.fqdn` | Configured FQDN |
 | `vip_address` | first `config.vip[].ip_address`/`ip6_address` | Service IP |
@@ -246,7 +253,7 @@ analytics fields in [§4](#4-analytics-metric-fields-per-measurement)).
 | `oper_status_code` | int | Enum index of `oper_status` |
 | `health_score` | float | `item.health_score.health_score` |
 | `admin_enabled` | int | `1` if `config.enabled` else `0` |
-| `num_pools` | int | Count of backend pools the VS references (`pools[]` length, or `1` for a single `pool_ref`). `>1` indicates an array of pools / pool group |
+| `num_pools` | int | Count of backend pools the VS references — `pools[]` length (which expands pool-group members), else `1` for a single `pool_ref`, else `0`. **Always emitted** (including `0`) so pool-group / `VH_PARENT` VSes still appear when filtering on `num_pools`. `>1` = array of pools / pool group |
 | `percent_ses_up` | float | `runtime.percent_ses_up` |
 
 ### `/devices/avi/pool`
