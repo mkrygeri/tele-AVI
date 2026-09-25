@@ -63,6 +63,30 @@ OPER_STATE_ENUM = [
 ]
 OPER_STATUS_CODE = {name: index for index, name in enumerate(OPER_STATE_ENUM)}
 
+# Cluster node role -> stable numeric code so dashboards/alerts can trigger on a
+# leadership change. 0 = unset, -1 = present but unmapped.
+CLUSTER_ROLE_CODE = {
+    "CLUSTER_LEADER": 1,
+    "CLUSTER_FOLLOWER": 2,
+    "CLUSTER_STANDALONE": 3,
+}
+
+# Cluster node membership state -> stable numeric code (0 = unset, -1 = present
+# but unmapped). Ordered healthy-low from /api/cluster/runtime node_states[].state
+# so a change in the number flags a node transitioning in/out of the cluster.
+CLUSTER_NODE_STATE_CODE = {
+    "CLUSTER_ACTIVE": 1,
+    "CLUSTER_UP_HA_ACTIVE": 2,
+    "CLUSTER_UP_HA_COMPROMISED": 3,
+    "CLUSTER_UP_HA_NOT_READY": 4,
+    "CLUSTER_UP_NO_HA": 5,
+    "CLUSTER_INIT": 6,
+    "CLUSTER_INIT_MAINTENANCE": 7,
+    "CLUSTER_INIT_NODE_UNREACHABLE": 8,
+    "CLUSTER_CONFIG_ERROR": 9,
+    "CLUSTER_DOWN": 10,
+}
+
 METRIC_IDS = {
     "virtualservice": [
         # Client-side (client->VS) connection counts. These carry the real VS
@@ -1171,11 +1195,18 @@ def _build_cluster_node_records(
             tags["node_state"] = str(node_state)
 
         # member=1 guarantees a field even when runtime state is unavailable;
-        # up is only emitted when a per-node state is known.
+        # up is only emitted when a per-node state is known. role_code and
+        # node_state_code are always emitted (0=unset, -1=unmapped) so the
+        # series is continuous and alerts can fire on any change.
         fields: Dict[str, object] = {"member": 1}
+        role_text = str(role).upper() if role else ""
+        state_text = str(node_state).upper() if node_state else ""
+        fields["role_code"] = CLUSTER_ROLE_CODE.get(role_text, 0 if not role_text else -1)
+        fields["node_state_code"] = CLUSTER_NODE_STATE_CODE.get(
+            state_text, 0 if not state_text else -1
+        )
         if node_state:
-            text = str(node_state).upper()
-            fields["up"] = 1 if ("ACTIVE" in text or text.startswith("CLUSTER_UP")) else 0
+            fields["up"] = 1 if ("ACTIVE" in state_text or state_text.startswith("CLUSTER_UP")) else 0
 
         records.append({"tags": tags, "fields": fields})
     return records

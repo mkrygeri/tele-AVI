@@ -410,6 +410,8 @@ disk usage for alerting on a single node rather than the cluster aggregate.
 |-------|------|---------------------|
 | `member` | int | Always `1` — guarantees a field and counts configured members |
 | `up` | int | `1` if `node_state` contains `ACTIVE` or starts with `CLUSTER_UP`, else `0`. Emitted only when a per-node state is known |
+| `role_code` | int | Numeric code for the `role` tag (see §7). `0` = unset, `-1` = present but unmapped. Always emitted so alerts can fire on a leadership change |
+| `node_state_code` | int | Numeric code for the `node_state` tag (see §7). `0` = unset, `-1` = present but unmapped. Always emitted so alerts can fire on a membership-state change |
 | `avg_cpu_usage` | float | Per-node CPU % — `controller_stats.avg_cpu_usage` filtered by this node's `entity_uuid` |
 | `avg_mem_usage` | float | Per-node memory % — `controller_stats.avg_mem_usage` |
 | `avg_disk_usage` | float | Per-node disk % — `controller_stats.avg_disk_usage` |
@@ -447,6 +449,42 @@ action vs `OPER_RESOURCES` = no SE capacity).
 
 ---
 
+## 6b. Cluster node role & state enums
+
+The `controller_node` measurement carries `role_code` and `node_state_code`
+integer fields alongside the `role` / `node_state` string tags. The mappings are
+fixed in the collector so dashboards and alerts can rely on stable numbers.
+Unset values map to `0` and any value not in the table maps to `-1`, so a change
+in the number always signals a real transition.
+
+**`role_code` — cluster node role** (`/api/cluster/runtime` `node_states[].role`)
+
+| Code | Role |
+|-----:|------|
+| 0 | unset |
+| 1 | `CLUSTER_LEADER` |
+| 2 | `CLUSTER_FOLLOWER` |
+| 3 | `CLUSTER_STANDALONE` |
+| -1 | present but unmapped |
+
+**`node_state_code` — cluster node membership state** (`node_states[].state`)
+
+| Code | State | Code | State |
+|-----:|-------|-----:|-------|
+| 0 | unset | 6 | `CLUSTER_INIT` |
+| 1 | `CLUSTER_ACTIVE` | 7 | `CLUSTER_INIT_MAINTENANCE` |
+| 2 | `CLUSTER_UP_HA_ACTIVE` | 8 | `CLUSTER_INIT_NODE_UNREACHABLE` |
+| 3 | `CLUSTER_UP_HA_COMPROMISED` | 9 | `CLUSTER_CONFIG_ERROR` |
+| 4 | `CLUSTER_UP_HA_NOT_READY` | 10 | `CLUSTER_DOWN` |
+| 5 | `CLUSTER_UP_NO_HA` | -1 | present but unmapped |
+
+Alerting tip: alert on any *change* in `role_code` (e.g. a follower becoming
+leader after a failover) or when `node_state_code` leaves its healthy value
+(`1` = `CLUSTER_ACTIVE`). The `up` field already collapses state to a simple
+up/down; `node_state_code` preserves the specific transition.
+
+---
+
 ## 7. Example records
 
 Line protocol as delivered to Kentik (timestamps trimmed). Global Telegraf tags
@@ -481,7 +519,7 @@ omitted for brevity.
 **Controller node — per-node record**
 
 ```
-/devices/avi/controller_node,cluster_name=cluster-0-1,node_name=198.47.119.104,node_uuid=564d9383…,node_ip=198.47.119.104,role=CLUSTER_LEADER,node_state=CLUSTER_ACTIVE avg_cpu_usage=5.2,avg_mem_usage=82.0,avg_disk_usage=20.0,avg_disk_read_bytes=0.0,avg_disk_write_bytes=98539.07,member=1i,up=1i
+/devices/avi/controller_node,cluster_name=cluster-0-1,node_name=198.47.119.104,node_uuid=564d9383…,node_ip=198.47.119.104,role=CLUSTER_LEADER,node_state=CLUSTER_ACTIVE avg_cpu_usage=5.2,avg_mem_usage=82.0,avg_disk_usage=20.0,avg_disk_read_bytes=0.0,avg_disk_write_bytes=98539.07,member=1i,role_code=1i,node_state_code=1i,up=1i
 ```
 
 ---
