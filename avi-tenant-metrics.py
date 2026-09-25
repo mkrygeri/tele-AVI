@@ -807,13 +807,14 @@ class AviCollector:
             )
         return self._analytics_profile_names
 
-    def fetch_vs_analytics_profiles(
-        self, tenant: Dict[str, str]
+    def fetch_entity_analytics_profiles(
+        self, api_path: str, entity_label: str, tenant: Dict[str, str]
     ) -> Dict[str, Tuple[str, str]]:
-        """Return {vs_uuid: (analytics_profile_uuid, name_from_ref)}.
+        """Return {entity_uuid: (analytics_profile_uuid, name_from_ref)}.
 
-        analytics_profile_ref is absent from VS inventory, so read it from the
-        slim VS object list; include_name expands the #name we fall back to.
+        analytics_profile_ref is absent from VS/pool inventory configs, so read
+        it from the slim object list at api_path; include_name expands the #name
+        we fall back to.
         """
         mapping: Dict[str, Tuple[str, str]] = {}
         params = {
@@ -822,31 +823,35 @@ class AviCollector:
             "fields": "uuid,analytics_profile_ref",
         }
         try:
-            for item in self._paged_get("/api/virtualservice", tenant, params):
-                vs_uuid = str(item.get("uuid") or "")
+            for item in self._paged_get(api_path, tenant, params):
+                entity_uuid = str(item.get("uuid") or "")
                 ap_uuid, ap_name = parse_ref(item.get("analytics_profile_ref"))
-                if vs_uuid and ap_uuid:
-                    mapping[vs_uuid] = (ap_uuid, ap_name)
+                if entity_uuid and ap_uuid:
+                    mapping[entity_uuid] = (ap_uuid, ap_name)
         except Exception as exc:  # noqa: BLE001
             print(
-                f"WARNING: VS analytics_profile lookup failed for tenant "
-                f"{tenant['name']} ({tenant['uuid']}): {exc}",
+                f"WARNING: {entity_label} analytics_profile lookup failed for "
+                f"tenant {tenant['name']} ({tenant['uuid']}): {exc}",
                 file=sys.stderr,
             )
         return mapping
 
-    def enrich_vs_analytics_profiles(
+    def enrich_analytics_profiles(
         self,
         tenant: Dict[str, str],
         inventory: Dict[str, Dict[str, Dict[str, object]]],
+        api_path: str,
+        entity_label: str,
     ) -> None:
-        """Add analytics_profile_name/uuid tags to each VS enrichment entry."""
+        """Add analytics_profile_name/uuid tags to each entity's enrichment entry."""
         if not inventory:
             return
         profile_names = self.fetch_analytics_profile_names(tenant)
-        vs_profiles = self.fetch_vs_analytics_profiles(tenant)
-        for vs_uuid, (ap_uuid, ap_name_from_ref) in vs_profiles.items():
-            entry = inventory.get(vs_uuid)
+        entity_profiles = self.fetch_entity_analytics_profiles(
+            api_path, entity_label, tenant
+        )
+        for entity_uuid, (ap_uuid, ap_name_from_ref) in entity_profiles.items():
+            entry = inventory.get(entity_uuid)
             if not isinstance(entry, dict):
                 continue
             tags = entry.setdefault("tags", {})
@@ -1509,9 +1514,13 @@ def main() -> int:
                     )
                     continue
                 inventory_by_endpoint[endpoint] = inventory
-                if endpoint == "virtualservice":
+                if endpoint in ("virtualservice", "pool"):
+                    api_path = f"/api/{endpoint}"
+                    label = "VS" if endpoint == "virtualservice" else "pool"
                     try:
-                        collector.enrich_vs_analytics_profiles(tenant, inventory)
+                        collector.enrich_analytics_profiles(
+                            tenant, inventory, api_path, label
+                        )
                     except Exception as exc:  # noqa: BLE001
                         print(
                             f"WARNING: analytics profile enrichment failed for "

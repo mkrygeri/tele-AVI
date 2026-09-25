@@ -65,19 +65,21 @@ GET /api/serviceengine-inventory?include_name=true&page_size=200
   `alert{…}`, plus relationship arrays (`pools[]`, `virtualservices[]`, …).
 - Results are paginated via the `next` link.
 
-**Supplementary VS lookup — analytics profile.** `analytics_profile_ref` is *not*
-part of `VsInventoryConfig`, so for virtual services the collector additionally
-reads it from the slim VS object list and resolves the name through the
-analytics-profile endpoint:
+**Supplementary lookup — analytics profile.** `analytics_profile_ref` is *not*
+part of `VsInventoryConfig` or `PoolConfig`, so for virtual services **and pools**
+the collector additionally reads it from the slim object list and resolves the
+name through the analytics-profile endpoint:
 
 ```
 GET /api/virtualservice?fields=uuid,analytics_profile_ref&include_name=true
+GET /api/pool?fields=uuid,analytics_profile_ref&include_name=true
 GET /api/analyticsprofile?fields=name&include_name=true   → {uuid: name} lookup
 ```
 
 The resolved `analytics_profile_name` / `analytics_profile_uuid` are merged onto
-the VS enrichment tags (keyed by `vs_uuid`). The analytics-profile map is cached
-and merged across tenants; the ref's embedded `#name` is used as a fallback.
+the VS and pool enrichment tags (keyed by entity `uuid`). The analytics-profile
+map is cached and merged across tenants; the ref's embedded `#name` is used as a
+fallback.
 
 ### 2c. Cluster API — controller identity & state (controller only)
 
@@ -285,6 +287,8 @@ analytics fields in [§4](#4-analytics-metric-fields-per-measurement)).
 | `virtualservice_name` | same ref `#name` | **Pool → VS link** (first VS only) |
 | `cloud_name` | `config.cloud_ref` `#name` | Cloud |
 | `app_profile_type` | `item.app_profile_type` | Application profile |
+| `analytics_profile_name` | `analytics_profile_ref` resolved via `/api/analyticsprofile` (falls back to the ref `#name`) | Analytics profile applied to the pool. Not in pool inventory — read from the slim `/api/pool` object and resolved through the analytics-profile lookup |
+| `analytics_profile_uuid` | `analytics_profile_ref` uuid | Analytics profile identifier (joins to `/api/analyticsprofile`) |
 | `alert_level` | `item.alert.level` | Present when alerting |
 
 **Fields**
@@ -500,7 +504,7 @@ omitted for brevity.
 **Pool — state record**
 
 ```
-/devices/avi/pool,name=web-pool,oper_status=OPER_UP,virtualservice_name=web-vs,cloud_name=Default-Cloud,tenant_name=admin,entity_uuid=pool-051a… up=1i,oper_status_code=0i,health_score=100.0,num_virtualservices=1i,num_servers=2.0,num_servers_up=2.0
+/devices/avi/pool,name=web-pool,oper_status=OPER_UP,virtualservice_name=web-vs,analytics_profile_name=System-Analytics-Profile,analytics_profile_uuid=analyticsprofile-9671…,cloud_name=Default-Cloud,tenant_name=admin,entity_uuid=pool-051a… up=1i,oper_status_code=0i,health_score=100.0,num_virtualservices=1i,num_servers=2.0,num_servers_up=2.0
 ```
 
 **VS ↔ Pool — association (edge) records**
