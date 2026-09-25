@@ -65,6 +65,20 @@ GET /api/serviceengine-inventory?include_name=true&page_size=200
   `alert{…}`, plus relationship arrays (`pools[]`, `virtualservices[]`, …).
 - Results are paginated via the `next` link.
 
+**Supplementary VS lookup — analytics profile.** `analytics_profile_ref` is *not*
+part of `VsInventoryConfig`, so for virtual services the collector additionally
+reads it from the slim VS object list and resolves the name through the
+analytics-profile endpoint:
+
+```
+GET /api/virtualservice?fields=uuid,analytics_profile_ref&include_name=true
+GET /api/analyticsprofile?fields=name&include_name=true   → {uuid: name} lookup
+```
+
+The resolved `analytics_profile_name` / `analytics_profile_uuid` are merged onto
+the VS enrichment tags (keyed by `vs_uuid`). The analytics-profile map is cached
+and merged across tenants; the ref's embedded `#name` is used as a fallback.
+
 ### 2c. Cluster API — controller identity & state (controller only)
 
 ```
@@ -243,6 +257,8 @@ analytics fields in [§4](#4-analytics-metric-fields-per-measurement)).
 | `vs_type` | `config.type` | `VS_TYPE_NORMAL` / `VH_PARENT` / `VH_CHILD` |
 | `se_group_name` | `config.se_group_ref` `#name` | SE group placement |
 | `cloud_name` | `config.cloud_ref` `#name` | Cloud |
+| `analytics_profile_name` | `analytics_profile_ref` resolved via `/api/analyticsprofile` (falls back to the ref `#name`) | Analytics profile applied to the VS. Not in VS inventory — read from the slim `/api/virtualservice` object and resolved through the analytics-profile lookup |
+| `analytics_profile_uuid` | `analytics_profile_ref` uuid | Analytics profile identifier (joins to `/api/analyticsprofile`) |
 | `app_profile_type` | `item.app_profile_type` | e.g. `APPLICATION_PROFILE_TYPE_HTTP` |
 | `alert_level` | `item.alert.level` | e.g. `ALERT_HIGH` (present when alerting) |
 

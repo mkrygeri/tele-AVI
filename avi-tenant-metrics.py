@@ -384,6 +384,9 @@ class AviCollector:
         self._inventory_path_cache: Dict[str, str] = {}
         # Cache global controller (cluster) name/state; fetched once per run.
         self._cluster_info: Dict[str, Dict[str, object]] | None = None
+        # Analytics-profile uuid->name, resolved via /api/analyticsprofile and
+        # merged across tenants (profiles are few and usually shared).
+        self._analytics_profile_names: Dict[str, str] = {}
         # Per-node cluster records (name/IP/role/state), built alongside
         # _cluster_info and emitted once per run under controller_node.
         self._cluster_nodes: List[Dict[str, Dict[str, object]]] = []
@@ -731,6 +734,104 @@ class AviCollector:
             file=sys.stderr,
         )
         return {}
+
+    def _paged_get(
+        self, path: str, tenant: Dict[str, str], params: Dict[str, str]
+    ) -> Iterable[Dict[str, object]]:
+        """Yield result items across pages for a simple tenant-scoped GET."""
+        next_path = path
+        req_params = dict(params)
+        headers = {
+            "X-Avi-Version": self.api_version,
+            self.tenant_name_header: tenant["name"],
+        }
+        while next_path:
+            response = self._request(
+                "GET", next_path, params=req_params, headers=headers
+            )
+            payload = response.json()
+            for item in payload.get("results", []):
+                if isinstance(item, dict):
+                    yield item
+            next_url = payload.get("next")
+            if not next_url:
+                break
+            parsed = urlsplit(str(next_url))
+            next_path = parsed.path or path
+            req_params = dict(parse_qsl(parsed.query, keep_blank_values=True))
+            req_params.setdefault("include_name", "true")
+
+    def fetch_analytics_profile_names(self, tenant: Dict[str, str]) -> Dict[str, str]:
+        """Return the run-level {analyticsprofile_uuid: name} lookup, refreshed
+        with this tenant's visible profiles (inherited + custom)."""
+        params = {
+            "include_name": "true",
+            "page_size": str(self.inventory_page_size),
+            "fields": "name",
+        }
+        try:
+            for item in self._paged_get("/api/analyticsprofile", tenant, params):
+                uuid = str(item.get("uuid") or "")
+                name = item.get("name")
+                if uuid and name:
+                    self._analytics_profile_names[uuid] = str(name)
+        except Exception as exc:  # noqa: BLE001
+            print(
+                f"WARNING: analytics profile lookup failed for tenant "
+                f"{tenant['name']} ({tenant['uuid']}): {exc}",
+                file=sys.stderr,
+            )
+        return self._analytics_profile_names
+
+    def fetch_vs_analytics_profiles(
+        self, tenant: Dict[str, str]
+    ) -> Dict[str, Tuple[str, str]]:
+        """Return {vs_uuid: (analytics_profile_uuid, name_from_ref)}.
+
+        analytics_profile_ref is absent from VS inventory, so read it from the
+        slim VS object list; include_name expands the #name we fall back to.
+        """
+        mapping: Dict[str, Tuple[str, str]] = {}
+        params = {
+            "include_name": "true",
+            "page_size": str(self.inventory_page_size),
+            "fields": "uuid,analytics_profile_ref",
+        }
+        try:
+            for item in self._paged_get("/api/virtualservice", tenant, params):
+                vs_uuid = str(item.get("uuid") or "")
+                ap_uuid, ap_name = parse_ref(item.get("analytics_profile_ref"))
+                if vs_uuid and ap_uuid:
+                    mapping[vs_uuid] = (ap_uuid, ap_name)
+        except Exception as exc:  # noqa: BLE001
+            print(
+                f"WARNING: VS analytics_profile lookup failed for tenant "
+                f"{tenant['name']} ({tenant['uuid']}): {exc}",
+                file=sys.stderr,
+            )
+        return mapping
+
+    def enrich_vs_analytics_profiles(
+        self,
+        tenant: Dict[str, str],
+        inventory: Dict[str, Dict[str, Dict[str, object]]],
+    ) -> None:
+        """Add analytics_profile_name/uuid tags to each VS enrichment entry."""
+        if not inventory:
+            return
+        profile_names = self.fetch_analytics_profile_names(tenant)
+        vs_profiles = self.fetch_vs_analytics_profiles(tenant)
+        for vs_uuid, (ap_uuid, ap_name_from_ref) in vs_profiles.items():
+            entry = inventory.get(vs_uuid)
+            if not isinstance(entry, dict):
+                continue
+            tags = entry.setdefault("tags", {})
+            if not isinstance(tags, dict):
+                continue
+            name = profile_names.get(ap_uuid) or ap_name_from_ref
+            if name:
+                tags["analytics_profile_name"] = name
+            tags["analytics_profile_uuid"] = ap_uuid
 
     def fetch_cluster(self) -> Dict[str, Dict[str, object]]:
         """Return controller (cluster) name + state for enriching controller metrics.
@@ -1377,6 +1478,15 @@ def main() -> int:
                     )
                     continue
                 inventory_by_endpoint[endpoint] = inventory
+                if endpoint == "virtualservice":
+                    try:
+                        collector.enrich_vs_analytics_profiles(tenant, inventory)
+                    except Exception as exc:  # noqa: BLE001
+                        print(
+                            f"WARNING: analytics profile enrichment failed for "
+                            f"tenant {tenant['name']} ({tenant['uuid']}): {exc}",
+                            file=sys.stderr,
+                        )
                 print(
                     f"INFO: tenant={tenant['name']} ({tenant['uuid']}), "
                     f"inventory={endpoint}, entities={len(inventory)}",
